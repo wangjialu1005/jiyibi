@@ -1,0 +1,29 @@
+{
+  "name": "记一笔",
+  "short_name": "记一笔",
+  "description": "随手记账：分大类小类，按月按年汇总，数据只存在你的手机里。",
+  "lang": "zh-CN",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#FDF9F3",
+  "theme_color": "#FDF9F3",
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
