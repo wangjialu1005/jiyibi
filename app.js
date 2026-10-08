@@ -1,7 +1,7 @@
 /* 记一笔 —— 账先存在本机（IndexedDB）；开了家庭同步，再同步到自己的 GitHub 私有仓库。金额一律用「分」存整数 */
 'use strict';
 (() => {
-  const VERSION = '1.1.1';
+  const VERSION = '1.2.0';
   // 本机调试时可以用 ?api=/mockgh 指向假的 GitHub 接口；正式环境固定走 api.github.com
   const GH = (() => {
     const local = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
@@ -162,7 +162,7 @@
     entries: [], // 在账的记录，按日期倒序
     tombs: new Map(), // 同步模式下删掉的记录（只留 id 和时间），用来把「删除」同步给家人
     cats: null,
-    people: [], // 家人名单：记账人和「给谁」共用 [{id, name, up, del?}]
+    people: [], // 家人名单：开了同步的手机从这里选「这台手机是谁」[{id, name, av?, up, del?}]
     prefs: { lastBackup: 0, snoozeBackup: 0, lastCat: { out: null, in: null } },
     tab: 'list',
     month: todayKey().slice(0, 7), // 明细和汇总共用
@@ -239,14 +239,10 @@
     if (family()) { SY.st.dirty.people = true; saveSyncState(); scheduleSync(); }
     return savePeople();
   }
-  // 「给谁」在收入里读作「谁的」
-  const toLabel = (type) => (type === 'out' ? '给谁' : '谁的');
-  const toText = (e) => (e.to ? (e.type === 'out' ? `给${personName(e.to)}` : `${personName(e.to)}的`) : '');
   // 头像：两只小猪一只代表一方；没选小猪的家人用称呼的第一个字
   const AV = { bow: 'img/av-bow.png', tie: 'img/av-tie.png' };
   const AV_NAME = { bow: '蝴蝶结小猪', tie: '领结小猪' };
   function avatar(id, size) {
-    if (id === '') return `<img class="av ${size}" src="img/av-family.png" alt="">`; // 全家
     const p = personOf(id);
     if (p && AV[p.av]) return `<img class="av ${size}" src="${AV[p.av]}" alt="">`;
     return `<span class="av av-i ${size} tone-${hashTone(id)}" aria-hidden="true">${esc(chars(p ? p.name : '?')[0] || '?')}</span>`;
@@ -424,7 +420,7 @@
   }
 
   const matchFilter = (e, f) => e.date >= f.start && e.date <= f.end && e.type === f.type
-    && (f.kind === 'cat' ? e.cat === f.val : f.kind === 'to' ? (e.to || '') === f.val : (e.by || '') === f.val);
+    && (f.kind === 'cat' ? e.cat === f.val : (e.by || '') === f.val);
 
   function renderListBody() {
     const b = $('#listBody');
@@ -526,7 +522,6 @@
   function rowHTML(e) {
     const sub = e.sub ? `<span class="sub"> · ${esc(e.sub)}</span>` : '';
     const tags = [];
-    if (e.to) tags.push(`<span class="who">${avatar(e.to, 'xs')}${esc(toText(e))}</span>`);
     // 自己记的不标，别人记的标上名字，免得每行都是同一个名字
     if (family() && e.by && e.by !== SY.cfg.me) tags.push(`<span class="who">${avatar(e.by, 'xs')}${esc(personName(e.by))}记</span>`);
     if (e.note) tags.push(`<span class="txt">${esc(e.note)}</span>`);
@@ -541,7 +536,7 @@
     const cents = /^\d+(\.\d{1,2})?$/.test(q) ? Math.round(parseFloat(q) * 100) : null;
     return S.entries.filter((e) => (e.note && e.note.toLowerCase().includes(k))
       || catName(e.cat).includes(q) || (e.sub && e.sub.includes(q))
-      || (e.to && personName(e.to).includes(q)) || (e.by && personName(e.by).includes(q))
+      || (e.by && personName(e.by).includes(q))
       || (cents !== null && e.amt === cents));
   }
 
@@ -619,8 +614,7 @@
     if (total) {
       h += `<section class="block"><h2 class="block-title"><span>${deco('snout', 'ic-snout')}按大类</span><span class="bt-hint">点一行看小类</span></h2>
         <div class="cat-list">${catBreakdown(list, total, type)}</div></section>`;
-      h += peopleBreakdown(list, total, type, 'to');
-      h += peopleBreakdown(list, total, type, 'by');
+      h += byBreakdown(list, total, type);
     }
     if (mode === 'year') h += yearTable(y);
     b.innerHTML = h;
@@ -667,21 +661,20 @@
     }).join('');
   }
 
-  // kind = 'to'：花在谁身上；kind = 'by'：谁记的（只在家庭同步、且有两个以上记账人时出现）
-  function peopleBreakdown(list, total, type, kind) {
-    if (kind === 'to' && !list.some((e) => e.to)) return '';
+  // 谁记的：只在家庭同步、且这段时间有两个以上记账人时出现
+  function byBreakdown(list, total, type) {
     const by = new Map();
-    for (const e of list) { const k = (kind === 'to' ? e.to : e.by) || ''; by.set(k, (by.get(k) || 0) + e.amt); }
-    if (kind === 'by' && (!family() || by.size < 2)) return '';
+    for (const e of list) { const k = e.by || ''; by.set(k, (by.get(k) || 0) + e.amt); }
+    if (!family() || by.size < 2) return '';
     const rows = [...by.entries()].sort((a, b) => b[1] - a[1]);
     const max = rows[0][1];
-    const title = kind === 'to' ? (type === 'out' ? '花在谁身上' : '谁的收入') : '谁记的';
-    const nameOf = (id) => (id ? personName(id) : kind === 'to' ? '全家' : '没标记');
+    const title = '谁记的';
+    const nameOf = (id) => (id ? personName(id) : '没标记');
     // 两只小猪各用自己的颜色（蝴蝶结粉、领结蓝），颜色跟着人走
     const barCls = (id) => { const p = personOf(id); return p && AV[p.av] ? `p-${p.av}` : type; };
     return `<section class="block"><h2 class="block-title"><span>${deco('snout', 'ic-snout')}${title}</span><span class="bt-hint">点一行看明细</span></h2><div class="cat-list">${rows.map(([id, amt]) => `<div class="cat-item">
-      <button class="cat-row" type="button" data-act="filter-open" data-kind="${kind}" data-val="${esc(id)}">
-        ${id || kind === 'to' ? avatar(id, 'md') : '<span class="av av-i md tone-7">?</span>'}
+      <button class="cat-row" type="button" data-act="filter-open" data-kind="by" data-val="${esc(id)}">
+        ${id ? avatar(id, 'md') : '<span class="av av-i md tone-7">?</span>'}
         <span class="cr-main">
           <span class="cr-top"><span class="cr-name">${esc(nameOf(id))}</span><span class="cr-pct num">${fmtPct((amt / total) * 100)}</span><span class="cr-amt num">${money(amt)}</span></span>
           <span class="cr-bar"><i class="${barCls(id)}" style="width:${Math.max(1.5, (amt / max) * 100).toFixed(2)}%"></i></span>
@@ -810,7 +803,6 @@
     const type = S.st.type;
     let name;
     if (kind === 'cat') name = catName(val);
-    else if (kind === 'to') { const who = val ? personName(val) : '全家'; name = type === 'out' ? `给${who}` : `${who}的收入`; }
     else name = `${val ? personName(val) : '没标记'}记的`;
     S.filter = { kind, val, type, start: r.start, end: r.end, label: `${name} · ${S.st.mode === 'month' ? monthLabel(S.month) : `${y}年`}` };
     S.searching = false;
@@ -819,7 +811,7 @@
   }
 
   /* ================= 记一笔（新增 / 编辑） ================= */
-  const F = { id: null, orig: null, type: 'out', cat: null, sub: '', to: '', expr: '', date: '', note: '', delArm: false };
+  const F = { id: null, orig: null, type: 'out', cat: null, sub: '', expr: '', date: '', note: '', delArm: false };
   let delTimer = 0, hintTimer = 0;
 
   function defaultCat(type) {
@@ -827,8 +819,8 @@
     return vis.some((c) => c.id === last) ? last : vis[0] ? vis[0].id : null;
   }
   function openEntry(e) {
-    if (e) Object.assign(F, { id: e.id, orig: e, type: e.type, cat: e.cat, sub: e.sub || '', to: e.to || '', expr: centsToExpr(e.amt), date: e.date, note: e.note || '' });
-    else Object.assign(F, { id: null, orig: null, type: S.lastType, cat: defaultCat(S.lastType), sub: '', to: '', expr: '', date: todayKey(), note: '' });
+    if (e) Object.assign(F, { id: e.id, orig: e, type: e.type, cat: e.cat, sub: e.sub || '', expr: centsToExpr(e.amt), date: e.date, note: e.note || '' });
+    else Object.assign(F, { id: null, orig: null, type: S.lastType, cat: defaultCat(S.lastType), sub: '', expr: '', date: todayKey(), note: '' });
     F.delArm = false;
     const del = $('#entryDelete');
     del.hidden = !F.id;
@@ -865,7 +857,6 @@
         <span class="tile tone-${toneOf(c.id)}">${esc(markOf(c))}</span><span class="tile-name">${esc(c.name)}</span></button>`).join('')
       + `<button class="cat-tile ghost" type="button" data-act="f-manage"><span class="tile">${I.gear}</span><span class="tile-name">管理分类</span></button>`;
     renderSubs();
-    renderTo();
     updateAmount();
     updateDate();
   }
@@ -876,15 +867,6 @@
     // 「＋ 加小类」直接跳到这个大类的编辑区，光标落在加小类的输入框里
     const add = c ? '<button class="chip ghost" type="button" data-act="f-addsub">＋ 加小类</button>' : '';
     $('#entrySubs').innerHTML = `<span class="subs-label">小类</span>${subs.map((s) => `<button class="chip" type="button" data-act="f-sub" data-sub="${esc(s)}" aria-pressed="${s === F.sub}">${esc(s)}</button>`).join('')}${add}`;
-  }
-  function renderTo() {
-    const people = activePeople();
-    const list = [{ id: '', name: '全家' }];
-    if (F.to && !people.some((p) => p.id === F.to)) list.push({ id: F.to, name: personName(F.to) }); // 已删掉的家人，旧账里照样显示
-    list.push(...people);
-    $('#entryTo').innerHTML = `<span class="subs-label">${toLabel(F.type)}</span>`
-      + list.map((p) => `<button class="chip" type="button" data-act="f-to" data-id="${esc(p.id)}" aria-pressed="${p.id === F.to}">${avatar(p.id, 'sm')}${esc(p.name)}</button>`).join('')
-      + `<button class="chip ghost" type="button" data-act="f-people">${people.length ? '管理家人' : '＋ 加家人'}</button>`;
   }
   function evalExpr(x) {
     if (!x) return 0;
@@ -959,7 +941,8 @@
     if (!F.cat) { flashHint('先选一个大类'); return; }
     const note = chars(F.note.trim()).slice(0, 100).join('');
     const isNew = !F.id;
-    const fields = { type: F.type, cat: F.cat, sub: F.sub, to: F.to, amt, date: F.date, note };
+    // 旧账里存过的「给谁」(to) 原样保留，只是不再显示和填写
+    const fields = { type: F.type, cat: F.cat, sub: F.sub, amt, date: F.date, note };
     const e = isNew ? { id: uid('e'), ...fields, ts: Date.now() } : { ...F.orig, ...fields };
     if (isNew && family()) e.by = SY.cfg.me;
     try {
@@ -1054,7 +1037,7 @@
       <div class="group"><p class="group-title">分类与家人</p><div class="list">
         <button class="cell" type="button" data-act="set-page" data-page="cats" data-type="out"><span class="cell-main">支出分类</span><span class="cell-val">${visibleCats('out').length} 个大类</span>${I.right}</button>
         <button class="cell" type="button" data-act="set-page" data-page="cats" data-type="in"><span class="cell-main">收入分类</span><span class="cell-val">${visibleCats('in').length} 个大类</span>${I.right}</button>
-        <button class="cell" type="button" data-act="set-page" data-page="people"><span class="cell-main">家人</span><span class="cell-val">${activePeople().length ? activePeople().map((p) => esc(p.name)).join('、') : '记账时选「给谁」用'}</span>${I.right}</button>
+        ${SY.cfg ? `<button class="cell" type="button" data-act="set-page" data-page="people"><span class="cell-main">家人</span><span class="cell-val">${activePeople().map((p) => esc(p.name)).join('、') || '还没有'}</span>${I.right}</button>` : ''}
       </div></div>
       <div class="group"><p class="group-title">备份与导出</p><div class="list">
         <button class="cell" type="button" data-act="backup"><span class="cell-main">备份全部数据</span><span class="cell-val">${last}</span></button>
@@ -1156,7 +1139,7 @@
   function pagePeople() {
     const me = SY.cfg && SY.cfg.me;
     const list = activePeople();
-    let h = `<p class="page-lead">记账时可以选「这笔钱花在谁身上」，汇总里能看每个人花了多少。${SY.cfg ? '开了同步的手机，也是从这份名单里选自己是谁。' : ''}名单全家共用。</p>
+    let h = `<p class="page-lead">开了家庭同步的手机，从这份名单里选自己是谁；明细和汇总里会用头像标出是谁记的。名单全家共用。</p>
       <div class="group"><div class="list">`;
     h += list.length ? list.map((p) => {
       const open = P.edit === p.id;
@@ -1707,10 +1690,10 @@
   async function exportCSV() {
     const list = S.entries.filter((e) => !e.sample).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : (a.ts || 0) - (b.ts || 0)));
     if (!list.length) { toast('还没有记录可以导出'); return; }
-    const rows = [['日期', '收支', '大类', '小类', '金额', '给谁', '记账人', '备注']];
+    const rows = [['日期', '收支', '大类', '小类', '金额', '记账人', '备注']];
     for (const e of list) {
       rows.push([e.date, e.type === 'out' ? '支出' : '收入', catName(e.cat), e.sub || '', (e.amt / 100).toFixed(2),
-        e.to ? personName(e.to) : '全家', e.by ? personName(e.by) : '', e.note || '']);
+        e.by ? personName(e.by) : '', e.note || '']);
     }
     const csv = `﻿${rows.map((r) => r.map(csvCell).join(',')).join('\r\n')}`;
     const res = await deliverFile(`记一笔明细-${stamp8()}.csv`, csv, 'text/csv');
@@ -1969,10 +1952,8 @@
         break;
       case 'f-cat': if (F.cat !== d.cat) { F.cat = d.cat; F.sub = ''; } renderEntry(); break;
       case 'f-sub': F.sub = F.sub === d.sub ? '' : d.sub; renderSubs(); break;
-      case 'f-to': F.to = d.id; renderTo(); break;
       case 'f-manage': openSettings('cats', F.type); break;
       case 'f-addsub': openSettings('cats', F.type, F.cat); break;
-      case 'f-people': openSettings('people'); break;
       case 'f-del': deleteFromSheet(); break;
       // 设置
       case 'set-close': closeSettings(); break;
