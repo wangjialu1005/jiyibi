@@ -1,7 +1,7 @@
 /* 记一笔 —— 账先存在本机（IndexedDB）；开了家庭同步，再同步到自己的 GitHub 私有仓库。金额一律用「分」存整数 */
 'use strict';
 (() => {
-  const VERSION = '1.1';
+  const VERSION = '1.1.1';
   // 本机调试时可以用 ?api=/mockgh 指向假的 GitHub 接口；正式环境固定走 api.github.com
   const GH = (() => {
     const local = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
@@ -873,9 +873,9 @@
     const c = catOf(F.cat);
     const subs = c ? [...c.subs] : [];
     if (F.sub && !subs.includes(F.sub)) subs.unshift(F.sub);
-    $('#entrySubs').innerHTML = subs.length
-      ? `<span class="subs-label">小类</span>${subs.map((s) => `<button class="chip" type="button" data-act="f-sub" data-sub="${esc(s)}" aria-pressed="${s === F.sub}">${esc(s)}</button>`).join('')}`
-      : `<span class="subs-label">${c ? `「${esc(c.name)}」下没有小类，可在管理分类里加` : ''}</span>`;
+    // 「＋ 加小类」直接跳到这个大类的编辑区，光标落在加小类的输入框里
+    const add = c ? '<button class="chip ghost" type="button" data-act="f-addsub">＋ 加小类</button>' : '';
+    $('#entrySubs').innerHTML = `<span class="subs-label">小类</span>${subs.map((s) => `<button class="chip" type="button" data-act="f-sub" data-sub="${esc(s)}" aria-pressed="${s === F.sub}">${esc(s)}</button>`).join('')}${add}`;
   }
   function renderTo() {
     const people = activePeople();
@@ -999,15 +999,17 @@
   let armTimer = 0;
   const PAGE_TITLE = { main: '设置', people: '家人', 'sync-setup': '和家人一起记账', 'sync-who': '这台手机是谁', 'sync-invite': '邀请家人', 'sync-repo': '同步仓库' };
 
-  function openSettings(page, type) {
+  function openSettings(page, type, edit) {
     P.page = page || 'main';
     if (type) P.type = type;
-    P.edit = null; P.importData = null; P.armed = null;
+    P.edit = edit || null; P.importData = null; P.armed = null;
     closeMonthPicker();
     $('#setSheet').hidden = false;
     renderSettings();
     $('#setBody').scrollTop = 0;
-    $('#setPanel').focus({ preventScroll: true });
+    const sub = edit && $('#ceNewSub');
+    if (sub) { sub.scrollIntoView({ block: 'center' }); sub.focus(); } // 还在点击里，iPhone 会弹出键盘
+    else $('#setPanel').focus({ preventScroll: true });
   }
   function closeSettings() {
     $('#setSheet').hidden = true;
@@ -1119,7 +1121,7 @@
     h += vis.map((c) => {
       const open = P.edit === c.id;
       let s = `<div class="cat-ed"><button class="cell" type="button" data-act="cat-edit" data-cat="${esc(c.id)}" aria-expanded="${open}">
-        <span class="mark ${t}">${esc(markOf(c))}</span><span class="cell-main">${esc(c.name)}</span>
+        <span class="mark tone-${toneOf(c.id)}">${esc(markOf(c))}</span><span class="cell-main">${esc(c.name)}</span>
         <span class="cell-val">${c.subs.length ? `${c.subs.length} 个小类` : '无小类'}</span>${open ? I.up : I.down}</button>`;
       if (open) {
         const n = counts.get(c.id) || 0;
@@ -1127,8 +1129,9 @@
         s += `<div class="ce-body">
           <div class="ce-fields">
             <label class="field"><span>名称</span><input id="ceName" type="text" value="${esc(c.name)}" enterkeyhint="done" autocomplete="off"></label>
-            <label class="field short"><span>图标字</span><input id="ceMark" type="text" value="${esc(c.mark || '')}" placeholder="${esc(chars(c.name)[0])}" enterkeyhint="done" autocomplete="off"></label>
+            <label class="field short"><span>图标字</span><input id="ceMark" type="text" value="${esc(c.mark || '')}" placeholder="${esc(chars(c.name)[0])}" enterkeyhint="done" autocomplete="off" aria-describedby="markHint"></label>
           </div>
+          <p class="ce-note" id="markHint">图标字不填，就用名称的第一个字。</p>
           <div class="ce-subs">${c.subs.map((sub) => `<span class="chip x">${esc(sub)}<button type="button" data-act="sub-del" data-sub="${esc(sub)}" aria-label="删除小类 ${esc(sub)}">×</button></span>`).join('') || '<span class="muted">还没有小类</span>'}</div>
           <form class="ce-add" data-form="sub-add"><input id="ceNewSub" type="text" placeholder="加小类，比如：咖啡" enterkeyhint="done" autocomplete="off" aria-label="新小类名称"><button class="btn sm" type="submit">添加</button></form>
           <div class="ce-actions">
@@ -1144,7 +1147,7 @@
     h += `</div><button class="btn add-cat" type="button" data-act="cat-add">${I.plus}添加大类</button></div>`;
     if (hid.length) {
       h += `<div class="group"><p class="group-title">已隐藏的大类</p><div class="list">${hid.map((c) => `<div class="cell">
-        <span class="mark ${t}">${esc(markOf(c))}</span><span class="cell-main">${esc(c.name)}</span>
+        <span class="mark tone-${toneOf(c.id)}">${esc(markOf(c))}</span><span class="cell-main">${esc(c.name)}</span>
         <button class="link" type="button" data-act="cat-restore" data-cat="${esc(c.id)}">恢复</button></div>`).join('')}</div></div>`;
     }
     return h;
@@ -1186,7 +1189,11 @@
     const c = editingCat();
     if (!c) return;
     const name = chars(v.trim()).slice(0, 8).join('');
-    if (name && name !== c.name) { c.name = name; await touchCats(c); }
+    if (name && name !== c.name) {
+      if (!c.mark || c.mark === '新' || c.mark === chars(c.name)[0]) c.mark = '';
+      c.name = name;
+      await touchCats(c);
+    }
     refreshEditingRow(c);
   }
   async function remarkCategory(v) {
@@ -1209,6 +1216,7 @@
     if (!c || !inp) return;
     const v = chars(inp.value.trim()).slice(0, 10).join('');
     if (!v) return;
+    inp.value = '';
     if (c.subs.includes(v)) { toast('这个小类已经有了'); return; }
     c.subs.push(v);
     await touchCats(c);
@@ -1225,7 +1233,7 @@
   }
   async function addCategory() {
     const arr = S.cats[P.type];
-    const c = { id: uid('c'), name: '新大类', mark: '新', subs: [], hidden: false, ord: arr.reduce((m, x) => Math.max(m, x.ord), -1) + 1, up: 0 };
+    const c = { id: uid('c'), name: '新大类', mark: '', subs: [], hidden: false, ord: arr.reduce((m, x) => Math.max(m, x.ord), -1) + 1, up: 0 };
     arr.push(c);
     await touchCats(c);
     P.edit = c.id;
@@ -1963,6 +1971,7 @@
       case 'f-sub': F.sub = F.sub === d.sub ? '' : d.sub; renderSubs(); break;
       case 'f-to': F.to = d.id; renderTo(); break;
       case 'f-manage': openSettings('cats', F.type); break;
+      case 'f-addsub': openSettings('cats', F.type, F.cat); break;
       case 'f-people': openSettings('people'); break;
       case 'f-del': deleteFromSheet(); break;
       // 设置
@@ -2039,6 +2048,7 @@
     else if (t.id === 'importFile') { const f = t.files && t.files[0]; t.value = ''; if (f) onImportFile(f); }
     else if (t.id === 'ceName') renameCategory(t.value);
     else if (t.id === 'ceMark') remarkCategory(t.value);
+    else if (t.id === 'ceNewSub') addSub();
     else if (t.id === 'personName') renamePerson(t.value);
   });
   document.addEventListener('submit', async (ev) => {
@@ -2151,6 +2161,9 @@
       if (!SY.st.dirty.people && SY.st.dirty.people !== false) SY.st.dirty.people = false;
       SY.status = 'ok';
     }
+    // 1.1.0 新建大类时图标字被写死成「新」：改回跟着名字走（开了同步会顺带传给家人）
+    const stuck = ['out', 'in'].flatMap((t) => S.cats[t]).filter((c) => c.mark === '新' && chars(c.name)[0] !== '新');
+    if (stuck.length) { stuck.forEach((c) => { c.mark = ''; }); await touchCats(...stuck); }
     setTab('list');
     initDesk();
     registerSW();
