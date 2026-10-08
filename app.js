@@ -1,7 +1,7 @@
 /* 记一笔 —— 账先存在本机（IndexedDB）；开了家庭同步，再同步到自己的 GitHub 私有仓库。金额一律用「分」存整数 */
 'use strict';
 (() => {
-  const VERSION = '1.2.0';
+  const VERSION = '1.3.0';
   // 本机调试时可以用 ?api=/mockgh 指向假的 GitHub 接口；正式环境固定走 api.github.com
   const GH = (() => {
     const local = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
@@ -54,6 +54,7 @@
     up: svg('<path d="M6 14.5l6-6 6 6"/>'),
     plus: svg('<path d="M12 5v14M5 12h14"/>'),
     share: svg('<path d="M12 3.5v11M8 7.5l4-4 4 4"/><path d="M7 10.5H6A1.5 1.5 0 0 0 4.5 12v6.5A1.5 1.5 0 0 0 6 20h12a1.5 1.5 0 0 0 1.5-1.5V12a1.5 1.5 0 0 0-1.5-1.5h-1"/>'),
+    lock: svg('<rect x="5" y="10.5" width="14" height="9.5" rx="2.5"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/>'),
     cloud: svg('<path d="M7 18.5h10.5a3.5 3.5 0 0 0 .3-6.99A5.5 5.5 0 0 0 7.1 10.1 4.2 4.2 0 0 0 7 18.5z"/>'),
   };
 
@@ -95,7 +96,8 @@
   const moneyShort = (c) => (Math.abs(c) >= 100000000 ? `${(c / 1000000).toFixed(1)}万` : money(c));
   const centsToExpr = (c) => (c / 100).toFixed(2).replace(/\.?0+$/, '');
   const axisLabel = (c) => { const v = c / 100; return v >= 10000 ? `${+(v / 10000).toFixed(1)}万` : String(Math.round(v)); };
-  const fmtPct = (p) => `${p >= 10 ? p.toFixed(0) : p.toFixed(1)}%`;
+  // 接近 100% 时保留一位小数，免得 99.7% 显示成 100%
+  const fmtPct = (p) => `${p >= 99.95 ? '100' : p >= 10 && p < 99.5 ? p.toFixed(0) : p.toFixed(1)}%`;
 
   /* ================= 默认分类 ================= */
   const DEFAULT_CATS = {
@@ -172,11 +174,17 @@
     st: { mode: 'month', type: 'out', open: null },
     lastType: 'out',
     installHidden: false,
+    savings: [], // 存款账户 [{id, owner, name, amt, up, del?}]，owner 为空表示共同
+    lock: null, // 收入密码：{v, salt, iter, hash, up}，只存哈希
+    inc: { open: null }, // 收入页里展开的大类
   };
+  // 收入密码的解锁状态只放在内存里：重新打开 App、或在后台超过 1 分钟，就重新上锁
+  const U = { unlocked: false, hiddenAt: 0, fails: 0, waitUntil: 0 };
+  const showIncome = () => U.unlocked;
   // 家庭同步：cfg 是仓库和口令，st 是同步进度（各文件版本号、待上传的改动）
   const SY = { cfg: null, st: null, status: 'off', err: '', busy: false, again: false, timer: 0, poll: 0 };
   const family = () => !!(SY.cfg && SY.cfg.me);
-  const freshSyncState = () => ({ shas: {}, dirty: { shards: [], cats: false, people: false }, lastOk: 0 });
+  const freshSyncState = () => ({ shas: {}, dirty: { shards: [], cats: false, people: false, lock: false, savings: false }, lastOk: 0 });
   const saveSyncState = () => (SY.st ? store.set('syncState', SY.st) : Promise.resolve());
 
   const isIOS = /iP(hone|od|ad)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -252,7 +260,7 @@
 
   /* ---------- 记录 ---------- */
   const byDateDesc = (a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (b.ts || 0) - (a.ts || 0));
-  const inRange = (start, end, type) => S.entries.filter((e) => e.date >= start && e.date <= end && (!type || e.type === type));
+  const inRange = (start, end, type) => S.entries.filter((e) => e.date >= start && e.date <= end && (!type || e.type === type) && (e.type === 'out' || showIncome()));
   const sum = (list) => list.reduce((a, e) => a + e.amt, 0);
   const totals = (list) => {
     let o = 0, i = 0;
@@ -343,17 +351,19 @@
     S.tab = t;
     $('#view-list').hidden = t !== 'list';
     $('#view-stats').hidden = t !== 'stats';
+    $('#view-income').hidden = t !== 'income';
     $$('.tab').forEach((b) => b.setAttribute('aria-current', b.dataset.tab === t ? 'page' : 'false'));
     closeMonthPicker();
     render();
+    if (t === 'income' && !U.unlocked && S.lock) openPin('unlock'); // 进收入页就弹出输密码
   }
-  function render() { if (S.tab === 'list') renderList(); else renderStats(); }
+  function render() { if (S.tab === 'list') renderList(); else if (S.tab === 'stats') renderStats(); else renderIncome(); }
   function renderList() { renderListHead(); renderListBody(); }
   function renderStats() { renderStatsHead(); renderStatsBody(); }
   // 同步拉到别人的改动后刷新：不打断正在输入的搜索框；设置首页不重画（里面有选文件的按钮，重画会弄丢选中的文件）
   function refreshViews() {
     if (!S.cats) return;
-    if (S.tab === 'list') { if (S.searching) renderListBody(); else renderList(); } else renderStats();
+    if (S.tab === 'list') { if (S.searching) renderListBody(); else renderList(); } else if (S.tab === 'stats') renderStats(); else renderIncome();
     const a = document.activeElement;
     if (!$('#setSheet').hidden && P.page !== 'main' && !(a && a.tagName === 'INPUT' && $('#setBody').contains(a))) renderSettings();
   }
@@ -406,7 +416,7 @@
     }
     if (S.filter) {
       h.innerHTML = `<div class="vhead-row">
-        <button class="back" type="button" data-act="filter-close">${I.left}<span>汇总</span></button>
+        <button class="back" type="button" data-act="filter-close">${I.left}<span>${S.filter.from === 'income' ? '收入' : '汇总'}</span></button>
         <h1 class="vtitle">${esc(S.filter.label)}</h1><span class="spacer"></span>
       </div>`;
       return;
@@ -415,12 +425,11 @@
       <div class="vhead-actions">
         ${syncBtn()}
         <button class="icon-btn" type="button" data-act="search-open" aria-label="搜索">${I.search}</button>
-        <button class="icon-btn" type="button" data-act="settings" aria-label="设置">${I.gear}</button>
       </div></div>`;
   }
 
   const matchFilter = (e, f) => e.date >= f.start && e.date <= f.end && e.type === f.type
-    && (f.kind === 'cat' ? e.cat === f.val : (e.by || '') === f.val);
+    && (f.kind === 'cat' ? e.cat === f.val : f.kind === 'own' ? (e.to || '') === f.val : (e.by || '') === f.val);
 
   function renderListBody() {
     const b = $('#listBody');
@@ -429,14 +438,14 @@
       if (!q) { b.innerHTML = '<p class="empty-note">输入关键词，在全部记录里找</p>'; return; }
       const list = searchEntries(q), t = totals(list);
       const cap = 300; // 关键词太宽时只画最近的 300 笔，合计仍按全部算
-      const meta = `<p class="result-meta">找到 ${list.length} 笔${list.length ? `　支出 ${money(t.out)}　收入 ${money(t.in)}` : ''}${list.length > cap ? `（只列出最近 ${cap} 笔）` : ''}</p>`;
+      const meta = `<p class="result-meta">找到 ${list.length} 笔${list.length ? `　支出 ${money(t.out)}${showIncome() ? `　收入 ${money(t.in)}` : ''}` : ''}${list.length > cap ? `（只列出最近 ${cap} 笔）` : ''}</p>`;
       b.innerHTML = meta + dayGroups(list.slice(0, cap));
       return;
     }
     if (S.filter) {
       const f = S.filter;
       const list = S.entries.filter((e) => matchFilter(e, f));
-      const mark = f.kind === 'cat' ? markHTML(f.val) : avatar(f.val, 'md');
+      const mark = f.kind === 'cat' ? markHTML(f.val) : f.kind === 'own' ? ownerAv(f.val, 'md') : avatar(f.val, 'md');
       b.innerHTML = `<div class="filter-sum">${mark}
         <div><div class="fs-l">${list.length} 笔${f.type === 'out' ? '支出' : '收入'}</div><div class="fs-v num">${money(sum(list))}</div></div></div>` + dayGroups(list);
       return;
@@ -453,9 +462,11 @@
       <img class="deco mc-pigs" src="img/pig-pair.png" alt="" width="124" height="97">
       <p class="mc-l">${deco('bow', 'ic-bow')}${cnMonth(S.month)}支出</p>
       <p class="mc-v">${money(t.out)}</p>
-      <div class="mc-tiles">
-        <div class="mc-tile in"><span class="mc-tl">收入</span><b>${moneyShort(t.in)}</b></div>
-        <div class="mc-tile bal"><span class="mc-tl">结余</span><b>${moneyShort(t.bal)}</b></div>
+      <div class="mc-tiles">${showIncome()
+        ? `<div class="mc-tile in"><span class="mc-tl">收入</span><b>${moneyShort(t.in)}</b></div>
+           <div class="mc-tile bal"><span class="mc-tl">结余</span><b>${moneyShort(t.bal)}</b></div>`
+        : `<div class="mc-tile n"><span class="mc-tl">支出笔数</span><b>${list.filter((e) => e.type === 'out').length}</b></div>
+           <div class="mc-tile avg"><span class="mc-tl">日均</span><b>${money(elapsedDays(monthRange(S.month)) ? Math.round(t.out / elapsedDays(monthRange(S.month))) : 0)}</b></div>`}
       </div>
     </section>`;
   }
@@ -524,6 +535,7 @@
     const tags = [];
     // 自己记的不标，别人记的标上名字，免得每行都是同一个名字
     if (family() && e.by && e.by !== SY.cfg.me) tags.push(`<span class="who">${avatar(e.by, 'xs')}${esc(personName(e.by))}记</span>`);
+    if (e.type === 'in' && e.to) tags.unshift(`<span class="who">${avatar(e.to, 'xs')}${esc(personName(e.to))}的</span>`);
     if (e.note) tags.push(`<span class="txt">${esc(e.note)}</span>`);
     return `<button class="row" type="button" data-act="edit" data-id="${esc(e.id)}">
       ${markHTML(e.cat)}
@@ -534,10 +546,10 @@
   function searchEntries(q) {
     const k = q.toLowerCase();
     const cents = /^\d+(\.\d{1,2})?$/.test(q) ? Math.round(parseFloat(q) * 100) : null;
-    return S.entries.filter((e) => (e.note && e.note.toLowerCase().includes(k))
+    return S.entries.filter((e) => (e.type === 'out' || showIncome()) && ((e.note && e.note.toLowerCase().includes(k))
       || catName(e.cat).includes(q) || (e.sub && e.sub.includes(q))
       || (e.by && personName(e.by).includes(q))
-      || (cents !== null && e.amt === cents));
+      || (cents !== null && e.amt === cents)));
   }
 
   /* ================= 月份选择 ================= */
@@ -554,7 +566,7 @@
   }
   function closeMonthPicker() { $('#monthPop').hidden = true; }
   function renderMonthPicker() {
-    const has = new Set(S.entries.map((e) => e.date.slice(0, 7)));
+    const has = new Set(S.entries.filter((e) => e.type === 'out' || showIncome()).map((e) => e.date.slice(0, 7)));
     let grid = '';
     for (let m = 1; m <= 12; m++) {
       const mk = `${mpYear}-${pad2(m)}`;
@@ -570,11 +582,14 @@
   const seg = (act, opts, cur, label) => `<div class="seg" role="radiogroup" aria-label="${label}">${opts.map(([v, t]) => `<button type="button" role="radio" aria-checked="${v === cur}" data-act="${act}" data-v="${v}">${t}</button>`).join('')}</div>`;
 
   function renderStatsHead() {
+    if (!showIncome()) S.st.type = 'out';
     $('#statsHead').innerHTML = `<div class="vhead-row">${monthNav()}
-      <div class="vhead-actions">${syncBtn()}<button class="icon-btn" type="button" data-act="settings" aria-label="设置">${I.gear}</button></div></div>
+      <div class="vhead-actions">${syncBtn()}</div></div>
       <div class="stats-ctrl">
         ${seg('st-mode', [['month', '按月'], ['year', '按年']], S.st.mode, '时间范围')}
-        ${seg('st-type', [['out', '支出'], ['in', '收入']], S.st.type, '收支')}
+        ${showIncome()
+          ? seg('st-type', [['out', '支出'], ['in', '收入']], S.st.type, '收支')
+          : `<button class="pill lock-pill" type="button" data-act="tab" data-tab="income">${I.lock}收入要输密码</button>`}
       </div>`;
   }
 
@@ -598,9 +613,11 @@
       <p class="hc-l">${periodName}${typeName}</p>
       <p class="hc-v ${type}"><span class="cur">¥</span>${money(total)}</p>
       ${meta.length ? `<div class="hc-meta">${meta.map((s) => `<span>${s}</span>`).join('')}</div>` : ''}
-      <div class="kpis">
-        <div><div class="k-l">${other[0]}</div><div class="k-v num ${other[2]}">${moneyShort(other[1])}</div></div>
-        <div><div class="k-l">结余</div><div class="k-v num">${moneyShort(t.bal)}</div></div>
+      <div class="kpis">${showIncome()
+        ? `<div><div class="k-l">${other[0]}</div><div class="k-v num ${other[2]}">${moneyShort(other[1])}</div></div>
+           <div><div class="k-l">结余</div><div class="k-v num">${moneyShort(t.bal)}</div></div>`
+        : `<div><div class="k-l">最大一笔</div><div class="k-v num">${moneyShort(list.reduce((m, e) => Math.max(m, e.amt), 0))}</div></div>
+           <div><div class="k-l">平均每笔</div><div class="k-v num">${moneyShort(list.length ? Math.round(total / list.length) : 0)}</div></div>`}
         <div><div class="k-l">${typeName}笔数</div><div class="k-v num">${list.length}</div></div>
       </div>
     </section>`;
@@ -625,7 +642,8 @@
     }
   }
 
-  function catBreakdown(list, total, type) {
+  function catBreakdown(list, total, type, ctx) {
+    ctx = ctx || { open: S.st.open, act: 'cat-toggle', mode: S.st.mode, from: 'stats' };
     const by = new Map();
     for (const e of list) {
       let c = by.get(e.cat);
@@ -636,9 +654,9 @@
     const rows = [...by.values()].sort((a, b) => b.amt - a.amt);
     const max = rows[0].amt;
     return rows.map((c) => {
-      const open = S.st.open === c.id;
+      const open = ctx.open === c.id;
       let h = `<div class="cat-item">
-        <button class="cat-row" type="button" data-act="cat-toggle" data-cat="${esc(c.id)}" aria-expanded="${open}">
+        <button class="cat-row" type="button" data-act="${ctx.act}" data-cat="${esc(c.id)}" aria-expanded="${open}">
           ${markHTML(c.id)}
           <span class="cr-main">
             <span class="cr-top"><span class="cr-name">${esc(catName(c.id))}</span><span class="cr-pct num">${fmtPct((c.amt / total) * 100)}</span><span class="cr-amt num">${money(c.amt)}</span></span>
@@ -655,7 +673,7 @@
             <span class="sr-pct num">${fmtPct((amt / c.amt) * 100)}</span>
             <span class="sr-amt num">${money(amt)}</span></div>`).join('');
         }
-        h += `<button class="link more" type="button" data-act="filter-open" data-kind="cat" data-val="${esc(c.id)}">查看这 ${c.n} 笔${I.right}</button></div>`;
+        h += `<button class="link more" type="button" data-act="filter-open" data-kind="cat" data-val="${esc(c.id)}" data-type="${type}" data-mode="${ctx.mode}" data-from="${ctx.from}">查看这 ${c.n} 笔${I.right}</button></div>`;
       }
       return `${h}</div>`;
     }).join('');
@@ -671,9 +689,9 @@
     const title = '谁记的';
     const nameOf = (id) => (id ? personName(id) : '没标记');
     // 两只小猪各用自己的颜色（蝴蝶结粉、领结蓝），颜色跟着人走
-    const barCls = (id) => { const p = personOf(id); return p && AV[p.av] ? `p-${p.av}` : type; };
+    const barCls = (id) => personBar(id, type);
     return `<section class="block"><h2 class="block-title"><span>${deco('snout', 'ic-snout')}${title}</span><span class="bt-hint">点一行看明细</span></h2><div class="cat-list">${rows.map(([id, amt]) => `<div class="cat-item">
-      <button class="cat-row" type="button" data-act="filter-open" data-kind="by" data-val="${esc(id)}">
+      <button class="cat-row" type="button" data-act="filter-open" data-kind="by" data-val="${esc(id)}" data-type="${type}" data-mode="${S.st.mode}" data-from="stats">
         ${id ? avatar(id, 'md') : '<span class="av av-i md tone-7">?</span>'}
         <span class="cr-main">
           <span class="cr-top"><span class="cr-name">${esc(nameOf(id))}</span><span class="cr-pct num">${fmtPct((amt / total) * 100)}</span><span class="cr-amt num">${money(amt)}</span></span>
@@ -691,10 +709,12 @@
       if (t.out || t.in) rows.push({ mk, m, ...t });
     }
     if (!rows.length) return '';
-    return `<section class="block"><h2 class="block-title"><span>${deco('snout', 'ic-snout')}每月收支</span><span class="bt-hint">点一行看那个月</span></h2><div class="table-wrap"><table class="ytable">
-      <thead><tr><th scope="col">月份</th><th scope="col">支出</th><th scope="col">收入</th><th scope="col">结余</th></tr></thead>
-      <tbody>${rows.map((r) => `<tr data-act="goto-month" data-mk="${r.mk}" tabindex="0"><th scope="row">${r.m}月</th><td class="num">${money(r.out)}</td><td class="num in">${money(r.in)}</td><td class="num">${money(r.bal)}</td></tr>`).join('')}</tbody>
-      <tfoot><tr><th scope="row">合计</th><td class="num">${money(out)}</td><td class="num in">${money(inn)}</td><td class="num">${money(inn - out)}</td></tr></tfoot>
+    const inc = showIncome(); // 没解锁只列支出
+    const cells = (o, i, b) => `<td class="num">${money(o)}</td>${inc ? `<td class="num in">${money(i)}</td><td class="num">${money(b)}</td>` : ''}`;
+    return `<section class="block"><h2 class="block-title"><span>${deco('snout', 'ic-snout')}${inc ? '每月收支' : '每月支出'}</span><span class="bt-hint">点一行看那个月</span></h2><div class="table-wrap"><table class="ytable">
+      <thead><tr><th scope="col">月份</th><th scope="col">支出</th>${inc ? '<th scope="col">收入</th><th scope="col">结余</th>' : ''}</tr></thead>
+      <tbody>${rows.map((r) => `<tr data-act="goto-month" data-mk="${r.mk}" tabindex="0"><th scope="row">${r.m}月</th>${cells(r.out, r.in, r.bal)}</tr>`).join('')}</tbody>
+      <tfoot><tr><th scope="row">合计</th>${cells(out, inn, inn - out)}</tr></tfoot>
     </table></div></section>`;
   }
 
@@ -797,30 +817,356 @@
     });
   }
 
-  function openFilter(kind, val) {
+  function openFilter(kind, val, opt) {
+    opt = opt || {};
+    const mode = opt.mode || S.st.mode, type = opt.type || S.st.type;
     const y = S.month.slice(0, 4);
-    const r = S.st.mode === 'month' ? monthRange(S.month) : yearRange(Number(y));
-    const type = S.st.type;
+    const r = mode === 'month' ? monthRange(S.month) : yearRange(Number(y));
     let name;
     if (kind === 'cat') name = catName(val);
+    else if (kind === 'own') name = `${ownerName(val)}的收入`;
     else name = `${val ? personName(val) : '没标记'}记的`;
-    S.filter = { kind, val, type, start: r.start, end: r.end, label: `${name} · ${S.st.mode === 'month' ? monthLabel(S.month) : `${y}年`}` };
+    S.filter = { kind, val, type, from: opt.from || 'stats', start: r.start, end: r.end, label: `${name} · ${mode === 'month' ? monthLabel(S.month) : `${y}年`}` };
     S.searching = false;
     setTab('list');
     $('#view-list').scrollTop = 0;
   }
 
+
+  /* ================= 收入（要输密码） ================= */
+  const ownerName = (id) => (id ? personName(id) : '共同');
+  const ownerAv = (id, size) => (id ? avatar(id, size) : `<span class="av av-i ${size} tone-7" aria-hidden="true">共</span>`);
+  // 两只小猪各用自己的颜色（蝴蝶结粉、领结蓝），颜色跟着人走
+  const personBar = (id, type) => { const p = personOf(id); return p && AV[p.av] ? `p-${p.av}` : type; };
+
+  function renderIncome() { renderIncomeHead(); renderIncomeBody(); }
+  function renderIncomeHead() {
+    $('#incHead').innerHTML = `<div class="vhead-row">${monthNav()}
+      <div class="vhead-actions">${syncBtn()}${U.unlocked ? `<button class="icon-btn" type="button" data-act="lock-now" aria-label="锁上收入" title="锁上收入">${I.lock}</button>` : ''}</div></div>`;
+  }
+  function renderIncomeBody() {
+    const b = $('#incBody');
+    if (!U.unlocked) {
+      b.innerHTML = `<div class="lock-box">
+        <img class="deco" src="img/pig-pair.png" alt="" width="160" height="125">
+        <p class="e-title">${S.lock ? '收入已上锁' : '给收入设一个密码'}</p>
+        <p class="e-sub">${S.lock ? '输入 6 位数字密码，查看收入和存款。' : '设好之后，只有知道密码的人能看收入和存款；没输密码时，明细和汇总里只显示支出。'}</p>
+        <button class="btn primary" type="button" data-act="${S.lock ? 'unlock' : 'pin-set'}">${I.lock}${S.lock ? '输入密码' : '设置密码'}</button>
+      </div>`;
+      return;
+    }
+    const r = monthRange(S.month);
+    const all = inRange(r.start, r.end);
+    const t = totals(all);
+    const list = all.filter((e) => e.type === 'in');
+    const delta = deltaText(compare('month', 'in'));
+    let h = `<section class="hero-card" aria-label="${monthLabel(S.month)}收入">
+      <img class="deco hero-pig" src="img/pig-head.png" alt="" width="66" height="65">
+      <p class="hc-l">${cnMonth(S.month)}收入</p>
+      <p class="hc-v in"><span class="cur">¥</span>${money(t.in)}</p>
+      ${delta ? `<div class="hc-meta"><span>${delta}</span></div>` : ''}
+      <div class="kpis">
+        <div><div class="k-l">支出</div><div class="k-v num">${moneyShort(t.out)}</div></div>
+        <div><div class="k-l">结余</div><div class="k-v num">${moneyShort(t.bal)}</div></div>
+        <div><div class="k-l">收入笔数</div><div class="k-v num">${list.length}</div></div>
+      </div>
+      <button class="btn inc wide" type="button" data-act="add-income">${I.plus}记一笔收入</button>
+    </section>`;
+    h += savingsCard();
+    if (t.in) {
+      h += ownerBreakdown(list, t.in);
+      h += `<section class="block"><h2 class="block-title"><span>${deco('snout', 'ic-snout')}收入小类</span><span class="bt-hint">点一行看小类</span></h2>
+        <div class="cat-list">${catBreakdown(list, t.in, 'in', { open: S.inc.open, act: 'inc-cat-toggle', mode: 'month', from: 'income' })}</div></section>`;
+      h += `<section class="block"><h2 class="block-title"><span>${deco('snout', 'ic-snout')}收入明细</span></h2>${dayGroups(list)}</section>`;
+    } else {
+      h += `<p class="empty-note">${cnMonth(S.month)}还没有收入记录</p>`;
+    }
+    b.innerHTML = h;
+  }
+  // 谁的收入：按收入归属（to）分，空的算「共同」
+  function ownerBreakdown(list, total) {
+    const by = new Map();
+    for (const e of list) by.set(e.to || '', (by.get(e.to || '') || 0) + e.amt);
+    const rows = [...by.entries()].sort((a, b) => b[1] - a[1]);
+    const max = rows[0][1];
+    return `<section class="block"><h2 class="block-title"><span>${deco('snout', 'ic-snout')}谁的收入</span><span class="bt-hint">点一行看明细</span></h2><div class="cat-list">${rows.map(([id, amt]) => `<div class="cat-item">
+      <button class="cat-row" type="button" data-act="filter-open" data-kind="own" data-val="${esc(id)}" data-type="in" data-mode="month" data-from="income">
+        ${ownerAv(id, 'md')}
+        <span class="cr-main">
+          <span class="cr-top"><span class="cr-name">${esc(ownerName(id))}</span><span class="cr-pct num">${fmtPct((amt / total) * 100)}</span><span class="cr-amt num">${money(amt)}</span></span>
+          <span class="cr-bar"><i class="${personBar(id, 'in')}" style="width:${Math.max(1.5, (amt / max) * 100).toFixed(2)}%"></i></span>
+        </span>
+      </button></div>`).join('')}</div></section>`;
+  }
+
+  /* ---------- 存款：手动记每个账户现在有多少 ---------- */
+  const liveSavings = () => S.savings.filter((x) => !x.del);
+  function savingsCard() {
+    const items = liveSavings();
+    const title = `<h2 class="block-title"><span>${deco('snout', 'ic-snout')}目前存款</span>`;
+    if (!items.length) {
+      return `<section class="block">${title}</h2><div class="cat-list"><button class="cell" type="button" data-act="savings-open"><span class="cell-main">还没记存款</span><span class="cell-val">记一下</span>${I.right}</button></div></section>`;
+    }
+    const total = items.reduce((a, x) => a + x.amt, 0);
+    const by = new Map();
+    items.forEach((x) => by.set(x.owner || '', (by.get(x.owner || '') || 0) + x.amt));
+    const rows = [...by.entries()].sort((a, b) => b[1] - a[1]);
+    const max = Math.max(1, rows[0][1]);
+    const latest = items.reduce((m, x) => Math.max(m, x.up || 0), 0);
+    return `<section class="block">${title}<span class="bt-hint">更新于 ${fmtTime(latest)}</span></h2>
+      <div class="cat-list">
+        <div class="sav-total"><span>合计</span><b class="num">${money(total)}</b></div>
+        ${rows.map(([id, amt]) => `<div class="cat-item"><div class="cat-row">
+          ${ownerAv(id, 'md')}
+          <span class="cr-main">
+            <span class="cr-top"><span class="cr-name">${esc(ownerName(id))}的存款</span><span class="cr-pct num">${total ? fmtPct((amt / total) * 100) : ''}</span><span class="cr-amt num">${money(amt)}</span></span>
+            <span class="cr-bar"><i class="${personBar(id, 'in')}" style="width:${Math.max(1.5, (amt / max) * 100).toFixed(2)}%"></i></span>
+          </span></div></div>`).join('')}
+        <div class="cat-item"><button class="cell" type="button" data-act="savings-open"><span class="cell-main">管理存款</span><span class="cell-val">${items.length} 个账户</span>${I.right}</button></div>
+      </div></section>`;
+  }
+  function pageSavings() {
+    if (!U.unlocked) return '<p class="page-lead">先在「收入」页输入密码，才能查看和修改存款。</p>';
+    const items = liveSavings();
+    let h = '<p class="page-lead">记下每个账户现在有多少钱，比如银行卡、余额宝、定期。数字变了就来改一下，收入页显示的是这里的合计。</p><div class="group"><div class="list">';
+    h += items.length ? items.map((x) => {
+      const open = P.edit === x.id;
+      let s = `<div class="cat-ed"><button class="cell" type="button" data-act="sav-edit" data-id="${esc(x.id)}" aria-expanded="${open}">
+        ${ownerAv(x.owner || '', 'md')}<span class="cell-main">${esc(x.name)}</span><span class="cell-val num">${money(x.amt)}</span>${open ? I.up : I.down}</button>`;
+      if (open) {
+        const armed = P.armed === `sdel:${x.id}`;
+        s += `<div class="ce-body">
+          <div class="ce-fields">
+            <label class="field"><span>账户名</span><input id="savName" type="text" value="${esc(x.name)}" enterkeyhint="done" autocomplete="off"></label>
+            <label class="field"><span>现在有多少（元）</span><input id="savAmt" type="text" inputmode="decimal" value="${centsToExpr(x.amt)}" enterkeyhint="done" autocomplete="off"></label>
+          </div>
+          <div class="field"><span>谁的存款</span><div class="ce-subs">${[...activePeople(), { id: '', name: '共同' }].map((p) => `<button class="chip" type="button" data-act="sav-owner" data-id="${esc(p.id)}" aria-pressed="${p.id === (x.owner || '')}">${p.id ? avatar(p.id, 'sm') : ''}${esc(p.name)}</button>`).join('')}</div></div>
+          <div class="ce-actions"><button class="btn sm ${armed ? 'armed' : 'danger'}" type="button" data-act="sav-del">${armed ? '再点一次确认' : '删除这个账户'}</button></div>
+        </div>`;
+      }
+      return `${s}</div>`;
+    }).join('') : '<div class="cell"><span class="cell-main muted">还没有记存款</span></div>';
+    h += `</div><button class="btn add-cat" type="button" data-act="sav-add">${I.plus}添加存款账户</button></div>`;
+    return h;
+  }
+  const editingSaving = () => S.savings.find((x) => x.id === P.edit);
+  const saveSavings = () => store.set('savings', S.savings);
+  function touchSavings(...list) {
+    const now = Date.now();
+    list.forEach((x) => { x.up = Math.max(now, (x.up || 0) + 1); });
+    if (family()) { SY.st.dirty.savings = true; saveSyncState(); scheduleSync(); }
+    return saveSavings();
+  }
+  async function addSaving() {
+    if (!U.unlocked) return;
+    const x = { id: uid('v'), owner: defaultOwner(), name: '银行卡', amt: 0, up: 0 };
+    S.savings.push(x);
+    await touchSavings(x);
+    P.edit = x.id;
+    renderSettings();
+    const inp = $('#savName');
+    if (inp) { inp.focus(); inp.select(); }
+  }
+  async function renameSaving(v) {
+    const x = editingSaving();
+    const name = chars(String(v).trim()).slice(0, 12).join('');
+    if (!x || !name || name === x.name) return;
+    x.name = name;
+    await touchSavings(x);
+    const row = $(`#setBody [data-act="sav-edit"][data-id="${CSS.escape(x.id)}"] .cell-main`);
+    if (row) row.textContent = x.name;
+  }
+  async function setSavingAmount(inp) {
+    const x = editingSaving();
+    if (!x) return;
+    const v = String(inp.value).replace(/[,，\s¥]/g, '');
+    if (!/^\d+(\.\d{1,2})?$/.test(v) || Number(v) >= 1e11) { toast('金额写数字就行，比如 52000 或 3000.50'); inp.value = centsToExpr(x.amt); return; }
+    const amt = Math.round(parseFloat(v) * 100);
+    if (amt === x.amt) return;
+    x.amt = amt;
+    await touchSavings(x);
+    const row = $(`#setBody [data-act="sav-edit"][data-id="${CSS.escape(x.id)}"] .cell-val`);
+    if (row) row.textContent = money(x.amt);
+  }
+  function deleteSaving() {
+    const x = editingSaving();
+    if (!x) return;
+    armOr(`sdel:${x.id}`, async () => {
+      x.del = true;
+      P.edit = null;
+      await touchSavings(x);
+      renderSettings();
+      toast(`已删除「${x.name}」`);
+    });
+  }
+  function mergeSavings(doc) {
+    let changed = false;
+    for (const raw of doc && Array.isArray(doc.items) ? doc.items : []) {
+      if (!raw || typeof raw.id !== 'string' || !Number.isFinite(raw.up)) continue;
+      const r = {
+        id: raw.id.slice(0, 64), owner: typeof raw.owner === 'string' ? raw.owner.slice(0, 64) : '',
+        name: chars(typeof raw.name === 'string' && raw.name ? raw.name : '存款').slice(0, 12).join(''),
+        amt: Number.isInteger(raw.amt) && raw.amt >= 0 && raw.amt < 1e13 ? raw.amt : 0, up: raw.up,
+      };
+      if (raw.del) r.del = true;
+      const i = S.savings.findIndex((x) => x.id === r.id);
+      if (i < 0) { S.savings.push(r); changed = true; } else if (r.up > S.savings[i].up) { S.savings[i] = r; changed = true; }
+    }
+    if (changed) saveSavings();
+    return changed;
+  }
+
+  /* ---------- 收入密码：6 位数字，只存加盐哈希（PBKDF2），全家共用一个 ---------- */
+  const bytesB64 = (u8) => { let s = ''; u8.forEach((x) => { s += String.fromCharCode(x); }); return btoa(s); };
+  const b64Bytes = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  const validLock = (l) => !!l && typeof l.salt === 'string' && typeof l.hash === 'string' && Number.isInteger(l.iter) && l.iter >= 1000 && Number.isFinite(l.up);
+  async function pinHash(pin, salt, iter) {
+    const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveBits']);
+    const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: b64Bytes(salt), iterations: iter }, key, 256);
+    return bytesB64(new Uint8Array(bits));
+  }
+  async function setPin(pin) {
+    const salt = bytesB64(crypto.getRandomValues(new Uint8Array(16)));
+    const iter = 120000;
+    S.lock = { v: 1, salt, iter, hash: await pinHash(pin, salt, iter), up: Math.max(Date.now(), ((S.lock && S.lock.up) || 0) + 1) };
+    await store.set('lock', S.lock);
+    if (family()) { SY.st.dirty.lock = true; saveSyncState(); scheduleSync(); }
+  }
+  const checkPin = async (pin) => !!S.lock && (await pinHash(pin, S.lock.salt, S.lock.iter)) === S.lock.hash;
+  function mergeLock(doc) {
+    if (!validLock(doc) || (S.lock && doc.up <= S.lock.up)) return false;
+    S.lock = { v: 1, salt: doc.salt, iter: doc.iter, hash: doc.hash, up: doc.up };
+    store.set('lock', S.lock);
+    lockNow(false); // 家人改了密码：这台手机也要重新输
+    return true;
+  }
+  function lockNow(say) {
+    if (!U.unlocked) return;
+    U.unlocked = false;
+    S.st.type = 'out';
+    if (S.filter && S.filter.type === 'in') { const from = S.filter.from; S.filter = null; if (S.tab === 'list') S.tab = from === 'income' ? 'income' : 'list'; setTab(S.tab); }
+    if (!$('#entrySheet').hidden && F.type === 'in') closeEntry();
+    if (!$('#setSheet').hidden && P.page === 'savings') gotoPage('main');
+    render();
+    if (!$('#setSheet').hidden) renderSettings();
+    if (say) toast('收入已锁上');
+  }
+  // 只在没开同步时可用：重置密码会删掉这台手机上的收入和存款
+  async function resetLocalPin() {
+    if (SY.cfg) return;
+    const ids = S.entries.filter((e) => e.type === 'in').map((e) => e.id);
+    await store.delMany(ids);
+    S.entries = S.entries.filter((e) => e.type !== 'in');
+    S.savings = [];
+    S.lock = null;
+    await store.set('savings', []);
+    await store.set('lock', null);
+    U.unlocked = false;
+    renderSettings();
+    render();
+    toast('密码已重置，收入和存款已清空');
+  }
+  function lockGroup() {
+    const foot = SY.cfg
+      ? '密码全家共用，改了之后家人手机上也要输新密码。忘了密码：让管仓库的人在 GitHub 私有仓库里删掉 lock.json，再重新设置。'
+      : '没输密码时，明细和汇总里只显示支出。';
+    return `<div class="group"><p class="group-title">收入密码</p><div class="list">
+      ${S.lock
+        ? `<button class="cell" type="button" data-act="pin-change"><span class="cell-main">修改收入密码</span>${I.right}</button>
+           ${U.unlocked ? '<button class="cell" type="button" data-act="lock-now"><span class="cell-main">现在锁上</span><span class="cell-val">收入已解锁</span></button>' : ''}
+           ${SY.cfg ? '' : `<button class="cell danger${P.armed === 'pin-reset' ? ' armed' : ''}" type="button" data-act="pin-reset">${P.armed === 'pin-reset' ? '再点一次：清空收入和存款并重置密码' : '忘了密码？重置'}</button>`}`
+        : `<button class="cell" type="button" data-act="pin-set"><span class="cell-main">设置收入密码</span><span class="cell-val">还没设</span>${I.right}</button>`}
+    </div><p class="group-foot">${foot}</p></div>`;
+  }
+
+  /* ---------- 输密码的面板 ---------- */
+  const PIN = { mode: '', buf: '', first: '', busy: false };
+  const PIN_TEXT = {
+    unlock: ['输入收入密码', '输对了才能看收入和存款'],
+    old: ['先输入现在的密码', ''],
+    set: ['设一个 6 位数字密码', '家里人共用这个密码，请记牢'],
+    confirm: ['再输一次', ''],
+  };
+  function openPin(mode) {
+    if (!window.crypto || !crypto.subtle) { toast('这个网址用不了密码功能，请从主屏幕的「记一笔」打开'); return; }
+    Object.assign(PIN, { mode, buf: '', first: '', busy: false });
+    $('#pinSheet').hidden = false;
+    renderPin();
+    $('#pinPanel').focus({ preventScroll: true });
+  }
+  function closePin() { $('#pinSheet').hidden = true; PIN.buf = ''; PIN.first = ''; }
+  function renderPin(msg, bad) {
+    const [title, hint] = PIN_TEXT[PIN.mode] || PIN_TEXT.unlock;
+    $('#pinTitle').textContent = title;
+    const m = $('#pinMsg');
+    m.textContent = msg || hint;
+    m.classList.toggle('warn', !!bad);
+    $$('#pinDots i').forEach((d, i) => d.classList.toggle('on', i < PIN.buf.length));
+  }
+  function shakePin() {
+    const d = $('#pinDots');
+    d.classList.remove('shake');
+    void d.offsetWidth;
+    d.classList.add('shake');
+  }
+  async function pinKey(k) {
+    if (PIN.busy || $('#pinSheet').hidden) return;
+    if (Date.now() < U.waitUntil) { renderPin(`试错太多次，${Math.ceil((U.waitUntil - Date.now()) / 1000)} 秒后再试`, true); return; }
+    if (k === 'del') { PIN.buf = PIN.buf.slice(0, -1); renderPin(); return; }
+    if (!/^\d$/.test(k) || PIN.buf.length >= 6) return;
+    PIN.buf += k;
+    renderPin();
+    if (PIN.buf.length < 6) return;
+    const pin = PIN.buf;
+    PIN.buf = '';
+    if (PIN.mode === 'unlock' || PIN.mode === 'old') {
+      PIN.busy = true;
+      let ok = false;
+      try { ok = await checkPin(pin); } finally { PIN.busy = false; }
+      if (!ok) {
+        U.fails += 1;
+        if (U.fails >= 5) { U.fails = 0; U.waitUntil = Date.now() + 30000; }
+        shakePin();
+        renderPin(U.waitUntil > Date.now() ? '试错太多次，30 秒后再试' : '密码不对，再试一次', true);
+        return;
+      }
+      U.fails = 0;
+      if (PIN.mode === 'old') { PIN.mode = 'set'; renderPin(); return; }
+      U.unlocked = true;
+      closePin();
+      afterUnlock();
+      return;
+    }
+    if (PIN.mode === 'set') { PIN.first = pin; PIN.mode = 'confirm'; renderPin(); return; }
+    if (pin !== PIN.first) { PIN.mode = 'set'; PIN.first = ''; shakePin(); renderPin('两次输的不一样，重新设一次', true); return; }
+    PIN.busy = true;
+    try { await setPin(pin); } finally { PIN.busy = false; }
+    U.unlocked = true;
+    closePin();
+    toast('收入密码设好了');
+    afterUnlock();
+  }
+  function afterUnlock() {
+    render();
+    if (!$('#setSheet').hidden) renderSettings();
+    if (!$('#entrySheet').hidden) renderEntry();
+  }
+
   /* ================= 记一笔（新增 / 编辑） ================= */
-  const F = { id: null, orig: null, type: 'out', cat: null, sub: '', expr: '', date: '', note: '', delArm: false };
+  const F = { id: null, orig: null, type: 'out', cat: null, sub: '', to: '', expr: '', date: '', note: '', delArm: false };
+  const defaultOwner = () => (family() ? SY.cfg.me : '');
   let delTimer = 0, hintTimer = 0;
 
   function defaultCat(type) {
     const vis = visibleCats(type), last = S.prefs.lastCat[type];
     return vis.some((c) => c.id === last) ? last : vis[0] ? vis[0].id : null;
   }
-  function openEntry(e) {
-    if (e) Object.assign(F, { id: e.id, orig: e, type: e.type, cat: e.cat, sub: e.sub || '', expr: centsToExpr(e.amt), date: e.date, note: e.note || '' });
-    else Object.assign(F, { id: null, orig: null, type: S.lastType, cat: defaultCat(S.lastType), sub: '', expr: '', date: todayKey(), note: '' });
+  function openEntry(e, type) {
+    if (e) Object.assign(F, { id: e.id, orig: e, type: e.type, cat: e.cat, sub: e.sub || '', to: e.to || '', expr: centsToExpr(e.amt), date: e.date, note: e.note || '' });
+    else {
+      const t = type === 'in' && showIncome() ? 'in' : 'out';
+      Object.assign(F, { id: null, orig: null, type: t, cat: defaultCat(t), sub: '', to: t === 'in' ? defaultOwner() : '', expr: '', date: todayKey(), note: '' });
+    }
     F.delArm = false;
     const del = $('#entryDelete');
     del.hidden = !F.id;
@@ -844,6 +1190,7 @@
     clearTimeout(delTimer);
   }
   function renderEntry() {
+    $('#entryType').hidden = !showIncome(); // 没解锁只能记支出，不显示「收入」
     $$('#entryType button').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.v === F.type)));
     $('#entrySheet').dataset.type = F.type;
     let cats = visibleCats(F.type);
@@ -857,8 +1204,20 @@
         <span class="tile tone-${toneOf(c.id)}">${esc(markOf(c))}</span><span class="tile-name">${esc(c.name)}</span></button>`).join('')
       + `<button class="cat-tile ghost" type="button" data-act="f-manage"><span class="tile">${I.gear}</span><span class="tile-name">管理分类</span></button>`;
     renderSubs();
+    renderOwner();
     updateAmount();
     updateDate();
+  }
+  // 记收入时选这笔收入是谁的（存在 to 字段里；支出已经不用它）
+  function renderOwner() {
+    const row = $('#entryOwner');
+    const people = activePeople();
+    const show = F.type === 'in' && showIncome() && people.length > 0;
+    row.hidden = !show;
+    if (!show) return;
+    const list = [...people, { id: '', name: '共同' }];
+    if (F.to && !people.some((p) => p.id === F.to)) list.unshift({ id: F.to, name: personName(F.to) });
+    row.innerHTML = `<span class="subs-label">谁的</span>${list.map((p) => `<button class="chip" type="button" data-act="f-owner" data-id="${esc(p.id)}" aria-pressed="${p.id === F.to}">${p.id ? avatar(p.id, 'sm') : ''}${esc(p.name)}</button>`).join('')}`;
   }
   function renderSubs() {
     const c = catOf(F.cat);
@@ -943,6 +1302,7 @@
     const isNew = !F.id;
     // 旧账里存过的「给谁」(to) 原样保留，只是不再显示和填写
     const fields = { type: F.type, cat: F.cat, sub: F.sub, amt, date: F.date, note };
+    if (F.type === 'in') fields.to = F.to; // 收入记下是谁的
     const e = isNew ? { id: uid('e'), ...fields, ts: Date.now() } : { ...F.orig, ...fields };
     if (isNew && family()) e.by = SY.cfg.me;
     try {
@@ -955,9 +1315,9 @@
     S.lastType = F.type;
     savePrefs();
     closeEntry();
-    if (S.tab === 'list' && !S.filter && !S.searching) S.month = e.date.slice(0, 7);
+    if ((S.tab === 'list' && !S.filter && !S.searching) || S.tab === 'income') S.month = e.date.slice(0, 7);
     render();
-    if (isNew) toast(`已记${e.type === 'out' ? '支出' : '收入'} ${money(amt)}`, { action: '再记一笔', onAction: () => openEntry() });
+    if (isNew) toast(`已记${e.type === 'out' ? '支出' : '收入'} ${money(amt)}`, { action: '再记一笔', onAction: () => openEntry(null, e.type) });
     else toast('已保存');
   }
   async function deleteFromSheet() {
@@ -980,7 +1340,7 @@
   /* ================= 设置 ================= */
   const P = { page: 'main', type: 'out', edit: null, importData: null, armed: null, connecting: false, newAv: '' };
   let armTimer = 0;
-  const PAGE_TITLE = { main: '设置', people: '家人', 'sync-setup': '和家人一起记账', 'sync-who': '这台手机是谁', 'sync-invite': '邀请家人', 'sync-repo': '同步仓库' };
+  const PAGE_TITLE = { main: '设置', savings: '存款', people: '家人', 'sync-setup': '和家人一起记账', 'sync-who': '这台手机是谁', 'sync-invite': '邀请家人', 'sync-repo': '同步仓库' };
 
   function openSettings(page, type, edit) {
     P.page = page || 'main';
@@ -1015,7 +1375,7 @@
     const main = P.page === 'main';
     $('#setBack').style.visibility = main ? 'hidden' : 'visible';
     $('#setTitle').textContent = P.page === 'cats' ? (P.type === 'out' ? '支出分类' : '收入分类') : PAGE_TITLE[P.page] || '设置';
-    const pages = { main: settingsMain, cats: settingsCats, people: pagePeople, 'sync-setup': pageSyncSetup, 'sync-who': pageSyncWho, 'sync-invite': pageSyncInvite, 'sync-repo': pageSyncRepo };
+    const pages = { main: settingsMain, cats: settingsCats, savings: pageSavings, people: pagePeople, 'sync-setup': pageSyncSetup, 'sync-who': pageSyncWho, 'sync-invite': pageSyncInvite, 'sync-repo': pageSyncRepo };
     $('#setBody').innerHTML = (pages[P.page] || settingsMain)();
     const img = $('#setBody .about-qr');
     if (img) img.addEventListener('error', () => { img.hidden = true; }, { once: true });
@@ -1033,11 +1393,12 @@
     return `<div class="group"><p class="group-title">外观（只改这台手机）</p>
         ${seg('skin', [['cute', '卡通'], ['plain', '正经']], skin, '外观')}
       </div>
+      ${lockGroup()}
       ${syncGroup()}
       <div class="group"><p class="group-title">分类与家人</p><div class="list">
         <button class="cell" type="button" data-act="set-page" data-page="cats" data-type="out"><span class="cell-main">支出分类</span><span class="cell-val">${visibleCats('out').length} 个大类</span>${I.right}</button>
         <button class="cell" type="button" data-act="set-page" data-page="cats" data-type="in"><span class="cell-main">收入分类</span><span class="cell-val">${visibleCats('in').length} 个大类</span>${I.right}</button>
-        ${SY.cfg ? `<button class="cell" type="button" data-act="set-page" data-page="people"><span class="cell-main">家人</span><span class="cell-val">${activePeople().map((p) => esc(p.name)).join('、') || '还没有'}</span>${I.right}</button>` : ''}
+        <button class="cell" type="button" data-act="set-page" data-page="people"><span class="cell-main">家人</span><span class="cell-val">${activePeople().map((p) => esc(p.name)).join('、') || '还没有'}</span>${I.right}</button>
       </div></div>
       <div class="group"><p class="group-title">备份与导出</p><div class="list">
         <button class="cell" type="button" data-act="backup"><span class="cell-main">备份全部数据</span><span class="cell-val">${last}</span></button>
@@ -1139,7 +1500,7 @@
   function pagePeople() {
     const me = SY.cfg && SY.cfg.me;
     const list = activePeople();
-    let h = `<p class="page-lead">开了家庭同步的手机，从这份名单里选自己是谁；明细和汇总里会用头像标出是谁记的。名单全家共用。</p>
+    let h = `<p class="page-lead">开了家庭同步的手机，从这份名单里选自己是谁；记收入和存款时，也从这里选是谁的。名单全家共用。</p>
       <div class="group"><div class="list">`;
     h += list.length ? list.map((p) => {
       const open = P.edit === p.id;
@@ -1379,7 +1740,8 @@
     let changed = false;
     for (const t of tree) {
       if (t.type !== 'blob' || st.shas[t.path] === t.sha) continue;
-      const kind = t.path === 'cats.json' ? 'cats' : t.path === 'people.json' ? 'people' : /^data\/\d{4}-\d{2}\.json$/.test(t.path) ? 'data' : '';
+      const kind = t.path === 'cats.json' ? 'cats' : t.path === 'people.json' ? 'people' : t.path === 'lock.json' ? 'lock'
+        : t.path === 'savings.json' ? 'savings' : /^data\/\d{4}-\d{2}\.json$/.test(t.path) ? 'data' : '';
       if (!kind) continue;
       const blob = await gh(`/git/blobs/${t.sha}`, { cache: 'force-cache' });
       let doc = null;
@@ -1387,6 +1749,8 @@
       if (doc) {
         if (kind === 'cats') changed = mergeCats(doc) || changed;
         else if (kind === 'people') changed = mergePeople(doc) || changed;
+        else if (kind === 'lock') changed = mergeLock(doc) || changed;
+        else if (kind === 'savings') changed = mergeSavings(doc) || changed;
         else changed = (await mergeEntries(doc)) || changed;
       }
       st.shas[t.path] = t.sha;
@@ -1431,6 +1795,20 @@
       try {
         await putFile('people.json', listDoc('people', S.people), '记一笔：家人');
       } catch (e) { st.dirty.people = true; await saveSyncState(); throw e; }
+      await saveSyncState();
+    }
+    if (st.dirty.lock && S.lock) {
+      st.dirty.lock = false;
+      try {
+        await putFile('lock.json', `${JSON.stringify(S.lock)}\n`, '记一笔：收入密码');
+      } catch (e) { st.dirty.lock = true; await saveSyncState(); throw e; }
+      await saveSyncState();
+    }
+    if (st.dirty.savings) {
+      st.dirty.savings = false;
+      try {
+        await putFile('savings.json', listDoc('items', S.savings), '记一笔：存款');
+      } catch (e) { st.dirty.savings = true; await saveSyncState(); throw e; }
       await saveSyncState();
     }
   }
@@ -1547,6 +1925,8 @@
       }
       SY.st.dirty.cats = true;
       SY.st.dirty.people = true;
+      if (S.lock && !SY.st.shas['lock.json']) SY.st.dirty.lock = true; // 家里还没有收入密码：用这台手机设过的
+      if (S.savings.length) SY.st.dirty.savings = true;
       await saveSyncState();
       startPolling();
     }
@@ -1670,15 +2050,16 @@
   const stamp8 = () => todayKey().replace(/-/g, '');
 
   async function doBackup() {
-    const entries = S.entries.filter((e) => !e.sample);
+    const entries = S.entries.filter((e) => !e.sample && (e.type === 'out' || showIncome()));
     if (!entries.length) { toast('还没有记录可以备份'); return; }
-    const data = { app: 'jiyibi', version: 2, exportedAt: new Date().toISOString(), categories: S.cats, people: S.people, entries };
+    const data = { app: 'jiyibi', version: 3, exportedAt: new Date().toISOString(), categories: S.cats, people: S.people, entries };
+    if (showIncome()) data.savings = S.savings;
     const res = await deliverFile(`记一笔备份-${stamp8()}.json`, JSON.stringify(data), 'application/json');
     if (res === 'cancel') return;
     S.prefs.lastBackup = Date.now();
     S.prefs.snoozeBackup = 0;
     await savePrefs();
-    toast(res === 'shared' ? `已备份 ${entries.length} 笔` : `备份文件已下载（${entries.length} 笔）`);
+    toast(`${res === 'shared' ? `已备份 ${entries.length} 笔` : `备份文件已下载（${entries.length} 笔）`}${showIncome() ? '' : '，收入没解锁不包含在内'}`);
     if (!$('#setSheet').hidden) renderSettings();
     render();
   }
@@ -1688,12 +2069,12 @@
     return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   async function exportCSV() {
-    const list = S.entries.filter((e) => !e.sample).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : (a.ts || 0) - (b.ts || 0)));
+    const list = S.entries.filter((e) => !e.sample && (e.type === 'out' || showIncome())).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : (a.ts || 0) - (b.ts || 0)));
     if (!list.length) { toast('还没有记录可以导出'); return; }
-    const rows = [['日期', '收支', '大类', '小类', '金额', '记账人', '备注']];
+    const rows = [['日期', '收支', '大类', '小类', '金额', '谁的收入', '记账人', '备注']];
     for (const e of list) {
       rows.push([e.date, e.type === 'out' ? '支出' : '收入', catName(e.cat), e.sub || '', (e.amt / 100).toFixed(2),
-        e.by ? personName(e.by) : '', e.note || '']);
+        e.type === 'in' ? ownerName(e.to || '') : '', e.by ? personName(e.by) : '', e.note || '']);
     }
     const csv = `﻿${rows.map((r) => r.map(csvCell).join(',')).join('\r\n')}`;
     const res = await deliverFile(`记一笔明细-${stamp8()}.csv`, csv, 'text/csv');
@@ -1746,6 +2127,7 @@
         entries,
         cats: validCats(d.categories) ? d.categories : null,
         people: Array.isArray(d.people) ? d.people : [],
+        savings: Array.isArray(d.savings) ? d.savings : [],
         skipped: d.entries.length - entries.length,
         from: dates[0], to: dates[dates.length - 1],
         exportedAt: typeof d.exportedAt === 'string' ? d.exportedAt.slice(0, 10) : '',
@@ -1779,6 +2161,7 @@
     }
     if (d.cats && mode === 'replace') await saveCats();
     mergePeople({ people: d.people });
+    if (d.savings.length && mergeSavings({ items: d.savings }) && family()) { SY.st.dirty.savings = true; saveSyncState(); }
     // 合并规则和同步一样：同一笔账，谁改得晚用谁
     const live = new Map(S.entries.map((e) => [e.id, e]));
     const accepted = [];
@@ -1912,7 +2295,21 @@
         if (d.tab === 'list') { S.filter = null; S.searching = false; S.query = ''; }
         setTab(d.tab);
         break;
-      case 'add': openEntry(); break;
+      case 'add': openEntry(null, S.tab === 'income' ? 'in' : 'out'); break;
+      case 'add-income': openEntry(null, 'in'); break;
+      case 'unlock': openPin('unlock'); break;
+      case 'pin-set': openPin('set'); break;
+      case 'pin-change': openPin('old'); break;
+      case 'pin-cancel': closePin(); break;
+      case 'lock-now': lockNow(true); break;
+      case 'pin-reset': armOr('pin-reset', resetLocalPin); break;
+      case 'inc-cat-toggle': S.inc.open = S.inc.open === d.cat ? null : d.cat; renderIncomeBody(); break;
+      case 'savings-open': openSettings('savings'); break;
+      case 'sav-add': addSaving(); break;
+      case 'sav-edit': P.edit = P.edit === d.id ? null : d.id; P.armed = null; renderSettings(); break;
+      case 'sav-owner': { const x = editingSaving(); if (x && (x.owner || '') !== d.id) { x.owner = d.id; touchSavings(x).then(renderSettings); } break; }
+      case 'sav-del': deleteSaving(); break;
+      case 'f-owner': F.to = d.id; renderOwner(); break;
       case 'edit': { const e = S.entries.find((x) => x.id === d.id); if (e) openEntry(e); break; }
       case 'period': shiftPeriod(Number(d.d)); break;
       case 'period-now': S.month = todayKey().slice(0, 7); S.st.open = null; render(); break;
@@ -1925,8 +2322,8 @@
         setTimeout(() => { const q = $('#q'); if (q) q.focus(); }, 30);
         break;
       case 'search-close': S.searching = false; S.query = ''; renderList(); break;
-      case 'filter-close': S.filter = null; setTab('stats'); break;
-      case 'filter-open': openFilter(d.kind, d.val); break;
+      case 'filter-close': { const from = S.filter && S.filter.from; S.filter = null; setTab(from === 'income' ? 'income' : 'stats'); break; }
+      case 'filter-open': openFilter(d.kind, d.val, { type: d.type, mode: d.mode, from: d.from }); break;
       case 'settings': openSettings(); break;
       case 'st-mode': S.st.mode = d.v; S.st.open = null; renderStats(); break;
       case 'st-type': S.st.type = d.v; S.st.open = null; renderStats(); break;
@@ -1942,11 +2339,12 @@
       // 记账面板
       case 'f-cancel': closeEntry(); break;
       case 'f-type':
-        if (F.type !== d.v) {
+        if (F.type !== d.v && (d.v === 'out' || showIncome())) {
           F.type = d.v;
           const same = F.orig && F.orig.type === d.v;
           F.cat = same ? F.orig.cat : defaultCat(d.v);
           F.sub = same ? F.orig.sub || '' : '';
+          F.to = same ? F.orig.to || '' : d.v === 'in' ? defaultOwner() : '';
           renderEntry();
         }
         break;
@@ -2009,6 +2407,10 @@
     }
   });
 
+  $('#pinKeys').addEventListener('click', (ev) => {
+    const b = ev.target.closest('[data-pk]');
+    if (b) pinKey(b.dataset.pk);
+  });
   $('#keys').addEventListener('click', (ev) => {
     const b = ev.target.closest('[data-k]');
     if (b) pressKey(b.dataset.k);
@@ -2031,6 +2433,8 @@
     else if (t.id === 'ceMark') remarkCategory(t.value);
     else if (t.id === 'ceNewSub') addSub();
     else if (t.id === 'personName') renamePerson(t.value);
+    else if (t.id === 'savName') renameSaving(t.value);
+    else if (t.id === 'savAmt') setSavingAmount(t);
   });
   document.addEventListener('submit', async (ev) => {
     ev.preventDefault();
@@ -2047,9 +2451,15 @@
   });
   document.addEventListener('keydown', (ev) => {
     const tgt = ev.target;
+    if (!$('#pinSheet').hidden) {
+      if (ev.key === 'Escape') closePin();
+      else if (/^[0-9]$/.test(ev.key)) { ev.preventDefault(); pinKey(ev.key); }
+      else if (ev.key === 'Backspace') { ev.preventDefault(); pinKey('del'); }
+      return;
+    }
     if (!$('#setSheet').hidden) {
       if (ev.key === 'Escape') closeSettings();
-      else if (ev.key === 'Enter' && ['ceName', 'ceMark', 'personName'].includes(tgt.id)) tgt.blur();
+      else if (ev.key === 'Enter' && ['ceName', 'ceMark', 'personName', 'savName', 'savAmt'].includes(tgt.id)) tgt.blur();
       return;
     }
     if (!$('#entrySheet').hidden) {
@@ -2082,8 +2492,15 @@
   // 隔夜再打开时「今天」要更新；切回前台顺便同步一次，切到后台前把没传的改动传上去
   document.addEventListener('visibilitychange', () => {
     if (!S.cats) return;
-    if (document.visibilityState === 'visible') { render(); syncNow(false); }
-    else if (family() && (SY.st.dirty.shards.length || SY.st.dirty.cats || SY.st.dirty.people)) syncNow(false);
+    if (document.visibilityState === 'visible') {
+      if (U.unlocked && Date.now() - U.hiddenAt > 60000) lockNow(false); // 在后台超过 1 分钟，收入重新上锁
+      render();
+      syncNow(false);
+    } else {
+      U.hiddenAt = Date.now();
+      const dt = family() && SY.st.dirty;
+      if (dt && (dt.shards.length || dt.cats || dt.people || dt.lock || dt.savings)) syncNow(false);
+    }
   });
   window.addEventListener('online', () => syncNow(false));
 
@@ -2124,9 +2541,11 @@
       $('#listBody').innerHTML = '<div class="empty"><p class="e-title">没法保存数据</p><p class="e-sub">这个浏览器不让网页存数据（可能开了无痕浏览）。换成普通模式再打开。</p></div>';
       return;
     }
-    const [all, cats, prefs, people, cfg, st] = await Promise.all(
-      [store.all(), store.get('cats'), store.get('prefs'), store.get('people'), store.get('sync'), store.get('syncState')],
+    const [all, cats, prefs, people, cfg, st, lock, savings] = await Promise.all(
+      [store.all(), store.get('cats'), store.get('prefs'), store.get('people'), store.get('sync'), store.get('syncState'), store.get('lock'), store.get('savings')],
     );
+    S.lock = validLock(lock) ? lock : null;
+    S.savings = Array.isArray(savings) ? savings : [];
     if (validCats(cats)) S.cats = normCats(cats);
     else { S.cats = normCats(JSON.parse(JSON.stringify(DEFAULT_CATS))); await store.set('cats', S.cats); }
     sortCats();
@@ -2139,7 +2558,7 @@
     if (cfg && cfg.owner && cfg.repo && cfg.token) {
       SY.cfg = cfg;
       SY.st = st && st.shas && st.dirty ? st : freshSyncState();
-      if (!SY.st.dirty.people && SY.st.dirty.people !== false) SY.st.dirty.people = false;
+      ['cats', 'people', 'lock', 'savings'].forEach((k) => { if (typeof SY.st.dirty[k] !== 'boolean') SY.st.dirty[k] = false; });
       SY.status = 'ok';
     }
     // 1.1.0 新建大类时图标字被写死成「新」：改回跟着名字走（开了同步会顺带传给家人）
