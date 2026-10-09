@@ -935,15 +935,18 @@ html[data-skin="plain"] { --ln-tie: #2F6FDB; --ln-bow: #D2557A; --ln-co: #8E8E93
 #entryType, #entryHead { grid-column: 2; }
 #entryDelete { grid-column: 3; }
 .entry-info { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 8px 24px 16px; text-align: center; }
-.entry-info .sav-pig { width: 104px; margin-bottom: 2px; }
-.si-name { display: inline-flex; align-items: center; gap: 8px; font-size: 18px; font-weight: 700; }
+.av.xl { width: 96px; height: 96px; font-size: 38px; }
+.entry-info .av.xl { margin-bottom: 8px; box-shadow: 0 0 0 4px var(--card), 0 8px 20px rgba(74, 62, 61, .16); }
+html[data-skin="plain"] .entry-info .av.xl { width: 64px; height: 64px; font-size: 26px; box-shadow: none; }
+.si-name { font-size: 18px; font-weight: 700; }
+.si-owner { margin-top: -4px; font-size: 13px; font-weight: 600; color: var(--ink-3); }
 .si-last { font-size: 14px; color: var(--ink-2); }
 .si-last.warn { color: var(--accent-ink); font-weight: 600; }
 .si-hint { max-width: 22em; margin-top: 4px; font-size: 12.5px; color: var(--ink-3); }
 .entry-label { flex: 1; min-width: 0; padding-bottom: 6px; font-size: 15px; font-weight: 700; color: var(--ink-2); }
 .amount .val.fresh { border-radius: 6px; background: var(--inc-soft); box-shadow: 0 0 0 4px var(--inc-soft); }
 @media (max-height: 700px) {
-  .entry-info .sav-pig { width: 80px; }
+  html[data-skin="cute"] .entry-info .av.xl { width: 76px; height: 76px; font-size: 30px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -1,7 +1,7 @@
 /* 记一笔 —— 账先存在本机（IndexedDB）；开了家庭同步，再同步到自己的 GitHub 私有仓库。金额一律用「分」存整数 */
 'use strict';
 (() => {
-  const VERSION = '1.4.0';
+  const VERSION = '1.4.1';
   // 本机调试时可以用 ?api=/mockgh 指向假的 GitHub 接口；正式环境固定走 api.github.com
   const GH = (() => {
     const local = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
@@ -1524,8 +1524,10 @@
     const line = same ? `<p class="si-last warn">${esc(day)}记过 ${money(same.amt)}，保存会换成新的金额</p>`
       : prev ? `<p class="si-last">上一次：${dayText(prev.d)} ${money(prev.amt)}</p>`
       : '<p class="si-last">这之前还没记过</p>';
-    $('#entryInfo').innerHTML = `<img class="deco sav-pig" src="img/pig-boy.png" alt="" width="104" height="138">
-      <p class="si-name">${ownerAv(x.owner || '', 'sm')}<span>${esc(x.name)}</span></p>${line}
+    // 大图就是这个账户主人的头像（放大），和列表里的头像一致
+    $('#entryInfo').innerHTML = `${ownerAv(x.owner || '', 'xl')}
+      <p class="si-name">${esc(x.name)}</p>
+      <p class="si-owner">${esc(ownerName(x.owner || ''))}的存款</p>${line}
       <p class="si-hint">输入账户里一共有多少钱，可以用 + − 算。点键盘上的日期，能补记以前的金额。</p>`;
   }
   // 换了日期：金额还是预填的，就换成那天的金额；空着的，那天记过就填上

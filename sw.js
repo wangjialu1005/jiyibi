@@ -1,5 +1,5 @@
 /* 离线缓存：页面文件缓存在手机上，断网也能打开。每次发布新版本改一下 VERSION。 */
-const VERSION = 'jiyibi-1.4.0';
+const VERSION = 'jiyibi-1.4.1';
 const ASSETS = [
   './',
   './index.html',
