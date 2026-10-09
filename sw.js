@@ -1,5 +1,5 @@
 /* 离线缓存：页面文件缓存在手机上，断网也能打开。每次发布新版本改一下 VERSION。 */
-const VERSION = 'jiyibi-1.3.0';
+const VERSION = 'jiyibi-1.4.0';
 const ASSETS = [
   './',
   './index.html',
@@ -12,6 +12,8 @@ const ASSETS = [
   './icons/icon-maskable-512.png',
   './img/pig-pair.png',
   './img/pig-head.png',
+  './img/pig-boy.png',
+  './img/pig-boy-head.png',
   './img/av-bow.png',
   './img/av-tie.png',
 ];

@@ -1,7 +1,7 @@
 /* 记一笔 —— 账先存在本机（IndexedDB）；开了家庭同步，再同步到自己的 GitHub 私有仓库。金额一律用「分」存整数 */
 'use strict';
 (() => {
-  const VERSION = '1.3.0';
+  const VERSION = '1.4.0';
   // 本机调试时可以用 ?api=/mockgh 指向假的 GitHub 接口；正式环境固定走 api.github.com
   const GH = (() => {
     const local = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
@@ -174,9 +174,9 @@
     st: { mode: 'month', type: 'out', open: null },
     lastType: 'out',
     installHidden: false,
-    savings: [], // 存款账户 [{id, owner, name, amt, up, del?}]，owner 为空表示共同
+    savings: [], // 存款账户 [{id, owner, name, amt, up, hist, del?}]，owner 为空表示共同；hist 是每次记的「哪天有多少」
     lock: null, // 收入密码：{v, salt, iter, hash, up}，只存哈希
-    inc: { open: null }, // 收入页里展开的大类
+    inc: { open: null, trend: 'total' }, // 收入页里展开的大类；存款趋势看合计还是按人
   };
   // 收入密码的解锁状态只放在内存里：重新打开 App、或在后台超过 1 分钟，就重新上锁
   const U = { unlocked: false, hiddenAt: 0, fails: 0, waitUntil: 0 };
@@ -452,7 +452,7 @@
     }
     const r = monthRange(S.month);
     const list = inRange(r.start, r.end);
-    const end = list.length ? '<div class="list-end deco"><img src="img/pig-head.png" alt="" width="56" height="55"><span>这个月就这些啦</span></div>' : '';
+    const end = list.length ? '<div class="list-end deco"><img src="img/pig-boy-head.png" alt="" width="56" height="62"><span>这个月就这些啦</span></div>' : '';
     b.innerHTML = monthCard(list) + banners() + (list.length ? dayGroups(list) + end : emptyMonth());
   }
 
@@ -860,8 +860,9 @@
     const t = totals(all);
     const list = all.filter((e) => e.type === 'in');
     const delta = deltaText(compare('month', 'in'));
+    const ser = savingsSeries();
     let h = `<section class="hero-card" aria-label="${monthLabel(S.month)}收入">
-      <img class="deco hero-pig" src="img/pig-head.png" alt="" width="66" height="65">
+      <img class="deco hero-pig" src="img/pig-boy-head.png" alt="" width="66" height="73">
       <p class="hc-l">${cnMonth(S.month)}收入</p>
       <p class="hc-v in"><span class="cur">¥</span>${money(t.in)}</p>
       ${delta ? `<div class="hc-meta"><span>${delta}</span></div>` : ''}
@@ -872,16 +873,19 @@
       </div>
       <button class="btn inc wide" type="button" data-act="add-income">${I.plus}记一笔收入</button>
     </section>`;
-    h += savingsCard();
+    h += savingsCard(ser);
+    h += trendBlock(ser);
     if (t.in) {
       h += ownerBreakdown(list, t.in);
       h += `<section class="block"><h2 class="block-title"><span>${deco('snout', 'ic-snout')}收入小类</span><span class="bt-hint">点一行看小类</span></h2>
         <div class="cat-list">${catBreakdown(list, t.in, 'in', { open: S.inc.open, act: 'inc-cat-toggle', mode: 'month', from: 'income' })}</div></section>`;
       h += `<section class="block"><h2 class="block-title"><span>${deco('snout', 'ic-snout')}收入明细</span></h2>${dayGroups(list)}</section>`;
     } else {
-      h += `<p class="empty-note">${cnMonth(S.month)}还没有收入记录</p>`;
+      h += `<div class="inc-empty"><img class="deco" src="img/pig-boy.png" alt="" width="80" height="106"><p class="empty-note">${cnMonth(S.month)}还没有收入记录</p></div>`;
     }
     b.innerHTML = h;
+    const tb = $('#trendBox');
+    if (tb) drawTrend(tb, ser, ser.owners.length > 1 ? S.inc.trend : 'total');
   }
   // 谁的收入：按收入归属（to）分，空的算「共同」
   function ownerBreakdown(list, total) {
@@ -899,9 +903,71 @@
       </button></div>`).join('')}</div></section>`;
   }
 
-  /* ---------- 存款：手动记每个账户现在有多少 ---------- */
+  /* ---------- 存款：每个账户记一串「哪天有多少」，当前金额取日期最晚的那条 ---------- */
+  // hist：[{d: 'YYYY-MM-DD', amt, t, del?}]，按日期排好，一天最多一条；t 是改动时间，同步时同一天谁的 t 大用谁。
+  // amt 一直跟着最新那条走（还没升级的 1.3.0 手机只认 amt）
   const liveSavings = () => S.savings.filter((x) => !x.del);
-  function savingsCard() {
+  const byDay = (a, b) => (a.d < b.d ? -1 : a.d > b.d ? 1 : 0);
+  const livePoints = (x) => (x.hist || []).filter((p) => !p.del);
+  const lastPoint = (x) => { const ps = livePoints(x); return ps.length ? ps[ps.length - 1] : null; };
+  const recalcAmt = (x) => { const p = lastPoint(x); x.amt = p ? p.amt : 0; };
+  const dayText = (k) => `${k.slice(0, 4) === todayKey().slice(0, 4) ? '' : `${k.slice(0, 4)}年`}${shortDate(k)}`;
+  // 某天（含）之前最近一次记的金额；那之前还没记过就是 null
+  function valueAt(x, d) {
+    let v = null;
+    for (const p of livePoints(x)) { if (p.d > d) break; v = p.amt; }
+    return v;
+  }
+  function setPoint(x, d, amt) {
+    const old = x.hist.find((p) => p.d === d);
+    x.hist = x.hist.filter((p) => p.d !== d);
+    x.hist.push({ d, amt, t: Math.max(Date.now(), old ? old.t + 1 : 0) });
+    x.hist.sort(byDay);
+    recalcAmt(x);
+  }
+  // 删掉的那天留一个墓碑，家人手机上同步后也会删掉
+  function dropPoint(x, d) {
+    const old = x.hist.find((p) => p.d === d);
+    if (!old || old.del) return null;
+    x.hist = x.hist.map((p) => (p.d === d ? { d, amt: 0, t: Math.max(Date.now(), old.t + 1), del: true } : p));
+    recalcAmt(x);
+    return old;
+  }
+  // 补记默认记到最早那条的上个月底，一个月一个月往回补
+  const pastDay = (x) => { const ps = livePoints(x); return monthRange(addMonths(ps.length ? ps[0].d.slice(0, 7) : todayKey().slice(0, 7), -1)).end; };
+
+  // 存款趋势：从最早一条记录的那个月到这个月（最多 24 个月），每个月取各账户月底（这个月取今天）的金额相加
+  function savingsSeries() {
+    const items = liveSavings().filter(lastPoint);
+    if (!items.length) return null;
+    const tk = todayKey(), nowMk = tk.slice(0, 7);
+    let start = items.reduce((m, x) => { const mk = livePoints(x)[0].d.slice(0, 7); return mk < m ? mk : m; }, nowMk);
+    if (start < addMonths(nowMk, -23)) start = addMonths(nowMk, -23);
+    const months = [];
+    for (let mk = start; mk <= nowMk; mk = addMonths(mk, 1)) months.push(mk);
+    const keys = [...new Set(items.map((x) => x.owner || ''))];
+    const total = [], by = keys.map(() => []);
+    for (const mk of months) {
+      const end = monthRange(mk).end, cut = end < tk ? end : tk;
+      let tot = 0;
+      const o = keys.map(() => null); // 这个人的账户那时还一条都没记：不算 0，画线时空着
+      for (const x of items) {
+        const v = valueAt(x, cut);
+        if (v == null) continue;
+        tot += v;
+        const k = keys.indexOf(x.owner || '');
+        o[k] = (o[k] || 0) + v;
+      }
+      total.push(tot);
+      o.forEach((v, i) => by[i].push(v));
+    }
+    // 钱多的人排前面，「共同」放最后
+    const owners = keys.map((id, i) => ({ id, values: by[i] }))
+      .sort((p, q) => (!p.id - !q.id) || (q.values[q.values.length - 1] - p.values[p.values.length - 1]));
+    return { months, total, owners };
+  }
+
+  function savingsCard(ser) {
     const items = liveSavings();
     const title = `<h2 class="block-title"><span>${deco('snout', 'ic-snout')}目前存款</span>`;
     if (!items.length) {
@@ -912,36 +978,207 @@
     items.forEach((x) => by.set(x.owner || '', (by.get(x.owner || '') || 0) + x.amt));
     const rows = [...by.entries()].sort((a, b) => b[1] - a[1]);
     const max = Math.max(1, rows[0][1]);
-    const latest = items.reduce((m, x) => Math.max(m, x.up || 0), 0);
-    return `<section class="block">${title}<span class="bt-hint">更新于 ${fmtTime(latest)}</span></h2>
+    const lastD = items.reduce((m, x) => { const p = lastPoint(x); return p && p.d > m ? p.d : m; }, '');
+    const n = ser ? ser.total.length : 0;
+    const prev = n >= 2 ? ser.total[n - 2] : 0;
+    const mom = prev ? deltaText({ label: '比上月底', cur: total, prev }) : '';
+    return `<section class="block">${title}${lastD ? `<span class="bt-hint">${dayText(lastD)}更新</span>` : ''}</h2>
       <div class="cat-list">
         <div class="sav-total"><span>合计</span><b class="num">${money(total)}</b></div>
+        ${mom ? `<p class="sav-mom${total > prev ? ' up' : total < prev ? ' down' : ''}">${mom}</p>` : ''}
         ${rows.map(([id, amt]) => `<div class="cat-item"><div class="cat-row">
           ${ownerAv(id, 'md')}
           <span class="cr-main">
             <span class="cr-top"><span class="cr-name">${esc(ownerName(id))}的存款</span><span class="cr-pct num">${total ? fmtPct((amt / total) * 100) : ''}</span><span class="cr-amt num">${money(amt)}</span></span>
             <span class="cr-bar"><i class="${personBar(id, 'in')}" style="width:${Math.max(1.5, (amt / max) * 100).toFixed(2)}%"></i></span>
           </span></div></div>`).join('')}
-        <div class="cat-item"><button class="cell" type="button" data-act="savings-open"><span class="cell-main">管理存款</span><span class="cell-val">${items.length} 个账户</span>${I.right}</button></div>
+        <div class="cat-item"><button class="cell" type="button" data-act="savings-open"><span class="cell-main">更新存款</span><span class="cell-val">${items.length} 个账户</span>${I.right}</button></div>
       </div></section>`;
   }
+
+  // 每人一条线：两只小猪各用自己的颜色（领结蓝、蝴蝶结粉），「共同」是灰色，其他家人轮流用备用色
+  function lineCls(id, i) {
+    if (!id) return 'ln-co';
+    const p = personOf(id);
+    return p && AV[p.av] ? `ln-${p.av}` : `ln-o${(i % 3) + 1}`;
+  }
+  function trendBlock(ser) {
+    if (!ser) return '';
+    const n = ser.months.length;
+    const title = `<h2 class="block-title"><span>${deco('snout', 'ic-snout')}存款趋势</span>`;
+    if (n < 2) {
+      return `<section class="block">${title}</h2><div class="card-like trend-empty">
+        <p>现在只有这个月的记录。把以前每个月底有多少补记上，就能看到存款是怎么涨起来的。</p>
+        <button class="btn sm" type="button" data-act="savings-open">去补记</button></div></section>`;
+    }
+    const d = ser.total[n - 1] - ser.total[0];
+    const first = ser.months[0];
+    const since = first.slice(0, 4) === ser.months[n - 1].slice(0, 4) ? `${Number(first.slice(5))}月底以来` : `${monthLabel(first)}底以来`;
+    const multi = ser.owners.length > 1;
+    const mode = multi ? S.inc.trend : 'total';
+    const legend = mode === 'owner'
+      ? `<div class="trend-legend">${ser.owners.map((o, i) => `<span><i class="sw ${lineCls(o.id, i)}"></i>${esc(ownerName(o.id))}</span>`).join('')}</div>` : '';
+    const aria = `存款趋势折线图：${since}${d > 0 ? '多了' : d < 0 ? '少了' : '持平'}${d ? ` ${money(Math.abs(d))}` : ''}，现在 ${money(ser.total[n - 1])}。可用左右方向键逐月查看`;
+    return `<section class="block">${title}<span class="bt-hint">${since}${d ? `${d > 0 ? '多了' : '少了'} ${money(Math.abs(d))}` : '持平'}</span></h2>
+      <div class="chart-wrap">
+        ${multi ? `<div class="trend-tools">${seg('trend-mode', [['total', '合计'], ['owner', '按人']], mode, '存款趋势看合计还是按人')}</div>` : ''}
+        <div class="chart-box" id="trendBox" tabindex="0" role="group" aria-label="${esc(aria)}"></div>${legend}
+      </div></section>`;
+  }
+
+  // 折线的纵轴不从 0 开始：按数据的高低取整，存款的涨跌才看得出来
+  function niceRange(minC, maxC) {
+    let lo = minC / 100, hi = maxC / 100;
+    if (hi - lo < 0.01) { const pad = Math.max(1, Math.abs(hi) * 0.05); lo -= pad; hi += pad; }
+    const raw = (hi - lo) / 3, mag = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / mag;
+    const step = (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * mag;
+    let a = Math.floor(lo / step) * step;
+    const b = Math.ceil(hi / step) * step;
+    if (a < 0 && minC >= 0) a = 0;
+    const ticks = [];
+    for (let v = a; v <= b + step / 1e6; v += step) ticks.push(Math.round(v * 100));
+    // 上万用「万」；小数位取刚好能把每个刻度写准的位数
+    const unit = b >= 10000 ? 10000 : 1;
+    const exact = (dec) => ticks.every((c) => { const v = (c / 100 / unit) * 10 ** dec; return Math.abs(v - Math.round(v)) < 1e-6; });
+    let dec = 0;
+    while (dec < 4 && !exact(dec)) dec++;
+    const label = (c) => (c === 0 ? '0' : `${+(c / 100 / unit).toFixed(dec)}${unit > 1 ? '万' : ''}`);
+    return { lo: ticks[0], hi: ticks[ticks.length - 1], ticks, label };
+  }
+  let hideTrendTip = null;
+  function drawTrend(box, ser, mode) {
+    const W = Math.max(240, Math.floor(box.clientWidth));
+    const H = 176, L = 44, R = 14, T = 22, B = 22;
+    const pw = W - L - R, ph = H - T - B;
+    const n = ser.months.length;
+    const lines = mode === 'owner'
+      ? ser.owners.map((o, i) => ({ cls: lineCls(o.id, i), name: ownerName(o.id), values: o.values }))
+      : [{ cls: 'ln-total', name: '合计', values: ser.total }];
+    const all = lines.flatMap((l) => l.values).filter((v) => v != null);
+    const sc = niceRange(Math.min(...all), Math.max(...all));
+    const q = (v) => Math.round(v * 100) / 100;
+    const X = (i) => L + (pw * i) / (n - 1);
+    const Y = (v) => T + ph - ((v - sc.lo) / (sc.hi - sc.lo)) * ph;
+    const nowMk = todayKey().slice(0, 7);
+    const sel = ser.months.indexOf(S.month);
+    const crossYear = ser.months[0].slice(0, 4) !== ser.months[n - 1].slice(0, 4);
+
+    let s = `<svg class="chart" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" aria-hidden="true">`;
+    if (mode !== 'owner') s += '<defs><linearGradient id="savGrad" x1="0" y1="0" x2="0" y2="1"><stop class="gs" offset="0" stop-opacity=".26"/><stop class="gs" offset="1" stop-opacity="0"/></linearGradient></defs>';
+    sc.ticks.forEach((v, k) => {
+      const yy = Math.round(Y(v)) + 0.5;
+      s += `<line class="${k ? 'grid' : 'axis'}" x1="${L}" x2="${W - R}" y1="${yy}" y2="${yy}"/>`;
+      s += `<text class="tick" x="${L - 7}" y="${yy + 3.5}" text-anchor="end">${sc.label(v)}</text>`;
+    });
+    s += `<line class="xh" x1="0" x2="0" y1="${T - 8}" y2="${T + ph}" visibility="hidden"/>`;
+    for (const l of lines) {
+      const idx = [...l.values.keys()].filter((i) => l.values[i] != null);
+      const pts = idx.map((i) => `${q(X(i))},${q(Y(l.values[i]))}`);
+      if (mode !== 'owner') s += `<path class="area" d="M${pts.join('L')}L${q(X(idx[idx.length - 1]))},${T + ph}L${q(X(idx[0]))},${T + ph}Z"/>`;
+      if (pts.length > 1) s += `<polyline class="ln ${l.cls}" points="${pts.join(' ')}"/>`;
+      for (const i of n <= 12 ? idx : [n - 1]) s += `<circle class="dot ${l.cls}" cx="${q(X(i))}" cy="${q(Y(l.values[i]))}" r="3.5"/>`;
+    }
+    // 合计只有一条线：把现在的金额标在最后一个点旁边（往下走时标在点下面，免得压住线）
+    if (mode !== 'owner') {
+      const v = ser.total[n - 1], down = ser.total[n - 2] > v;
+      s += `<text class="last" x="${q(X(n - 1))}" y="${q(Y(v) + (down ? 17 : -9))}" text-anchor="end">${money(v)}</text>`;
+    }
+    const every = Math.ceil(n / 6);
+    for (let i = n - 1; i >= 0; i -= every) {
+      const mk = ser.months[i], m = Number(mk.slice(5, 7));
+      const txt = crossYear && (m === 1 || i === 0) ? `${mk.slice(2, 4)}年${m}月` : `${m}月`;
+      s += `<text class="xl${i === sel ? ' now' : ''}" x="${q(X(i))}" y="${H - 6}" text-anchor="middle">${txt}</text>`;
+    }
+    for (const l of lines) s += `<circle class="hov ${l.cls}" cx="0" cy="0" r="5.5" visibility="hidden"/>`;
+    s += '</svg><div class="tip" role="status" aria-live="polite" hidden></div>';
+    box.innerHTML = s;
+
+    const svgEl = box.querySelector('svg'), tip = box.querySelector('.tip'), xh = svgEl.querySelector('.xh');
+    const hovs = [...svgEl.querySelectorAll('.hov')];
+    let cur = -1;
+    const scale = () => svgEl.getBoundingClientRect().width / W;
+    const idxAt = (clientX) => clamp(Math.round(((clientX - svgEl.getBoundingClientRect().left) / scale() - L) / (pw / (n - 1))), 0, n - 1);
+    const when = (i) => (ser.months[i] === nowMk ? '现在' : `${monthLabel(ser.months[i])}底`);
+    const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+    const show = (i) => {
+      cur = i;
+      xh.setAttribute('x1', q(X(i)));
+      xh.setAttribute('x2', q(X(i)));
+      xh.setAttribute('visibility', 'visible');
+      hovs.forEach((c, k) => {
+        const v = lines[k].values[i];
+        if (v == null) { c.setAttribute('visibility', 'hidden'); return; }
+        c.setAttribute('cx', q(X(i)));
+        c.setAttribute('cy', q(Y(v)));
+        c.setAttribute('visibility', 'visible');
+      });
+      tip.replaceChildren();
+      tip.classList.toggle('multi', lines.length > 1);
+      if (lines.length === 1) {
+        tip.append(el('b', '', money(lines[0].values[i])), el('span', '', when(i)));
+        if (i > 0) {
+          const dv = lines[0].values[i] - lines[0].values[i - 1];
+          if (dv) tip.append(el('span', 'tip-d', `${dv > 0 ? '↑' : '↓'}${money(Math.abs(dv))}`));
+        }
+      } else {
+        tip.append(el('span', 'tip-h', when(i)));
+        for (const l of lines) {
+          if (l.values[i] == null) continue;
+          const r = el('span', 'tip-r');
+          r.append(el('i', `sw ${l.cls}`), el('span', '', l.name), el('b', '', money(l.values[i])));
+          tip.append(r);
+        }
+      }
+      tip.hidden = false;
+      const c = X(i) * scale(), w = tip.offsetWidth, bw = box.clientWidth;
+      // 好几行的提示放在竖线旁边，别挡住选中的那几个点
+      const left = lines.length > 1 ? (c > bw / 2 ? c - w - 12 : c + 12) : c - w / 2;
+      tip.style.left = `${clamp(left, 0, Math.max(0, bw - w))}px`;
+    };
+    const hide = () => {
+      cur = -1;
+      tip.hidden = true;
+      xh.setAttribute('visibility', 'hidden');
+      hovs.forEach((c) => c.setAttribute('visibility', 'hidden'));
+    };
+    hideTrendTip = hide;
+    svgEl.addEventListener('pointerdown', (e) => show(idxAt(e.clientX)));
+    svgEl.addEventListener('pointermove', (e) => { if (e.pointerType === 'mouse' || e.buttons) show(idxAt(e.clientX)); });
+    svgEl.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') hide(); });
+    box.addEventListener('focus', () => { if (cur < 0) show(n - 1); });
+    box.addEventListener('blur', hide);
+    box.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        e.preventDefault();
+        show(clamp((cur < 0 ? n - 1 : cur) + (e.key === 'ArrowRight' ? 1 : -1), 0, n - 1));
+      } else if (e.key === 'Escape') hide();
+    });
+  }
+
   function pageSavings() {
     if (!U.unlocked) return '<p class="page-lead">先在「收入」页输入密码，才能查看和修改存款。</p>';
     const items = liveSavings();
-    let h = '<p class="page-lead">记下每个账户现在有多少钱，比如银行卡、余额宝、定期。数字变了就来改一下，收入页显示的是这里的合计。</p><div class="group"><div class="list">';
+    let h = '<p class="page-lead">记下每个账户有多少钱，比如银行卡、余额宝、定期。每次更新都按日期留一条，收入页就能画出存款趋势。</p><div class="group"><div class="list">';
     h += items.length ? items.map((x) => {
       const open = P.edit === x.id;
+      const lp = lastPoint(x);
       let s = `<div class="cat-ed"><button class="cell" type="button" data-act="sav-edit" data-id="${esc(x.id)}" aria-expanded="${open}">
-        ${ownerAv(x.owner || '', 'md')}<span class="cell-main">${esc(x.name)}</span><span class="cell-val num">${money(x.amt)}</span>${open ? I.up : I.down}</button>`;
+        ${ownerAv(x.owner || '', 'md')}<span class="cell-main">${esc(x.name)}<span class="cell-sub">${lp ? `${dayText(lp.d)}记的` : '还没记金额'}</span></span><span class="cell-val num">${money(x.amt)}</span>${open ? I.up : I.down}</button>`;
       if (open) {
         const armed = P.armed === `sdel:${x.id}`;
+        const pts = livePoints(x).reverse();
+        const shown = P.histAll ? pts : pts.slice(0, 6);
         s += `<div class="ce-body">
-          <div class="ce-fields">
-            <label class="field"><span>账户名</span><input id="savName" type="text" value="${esc(x.name)}" enterkeyhint="done" autocomplete="off"></label>
-            <label class="field"><span>现在有多少（元）</span><input id="savAmt" type="text" inputmode="decimal" value="${centsToExpr(x.amt)}" enterkeyhint="done" autocomplete="off"></label>
-          </div>
+          <button class="btn inc" type="button" data-act="sav-amt">${lp ? '更新金额' : '记一下现在有多少'}</button>
+          <label class="field"><span>账户名</span><input id="savName" type="text" value="${esc(x.name)}" enterkeyhint="done" autocomplete="off"></label>
           <div class="field"><span>谁的存款</span><div class="ce-subs">${[...activePeople(), { id: '', name: '共同' }].map((p) => `<button class="chip" type="button" data-act="sav-owner" data-id="${esc(p.id)}" aria-pressed="${p.id === (x.owner || '')}">${p.id ? avatar(p.id, 'sm') : ''}${esc(p.name)}</button>`).join('')}</div></div>
-          <div class="ce-actions"><button class="btn sm ${armed ? 'armed' : 'danger'}" type="button" data-act="sav-del">${armed ? '再点一次确认' : '删除这个账户'}</button></div>
+          ${pts.length ? `<div class="field"><span>记过的金额（点一条可以改）</span><div class="sav-hist">${shown.map((p) => `<div class="sh-row">
+              <button class="sh-main" type="button" data-act="sav-pt" data-d="${esc(p.d)}"><span>${dayText(p.d)}</span><b class="num">${money(p.amt)}</b></button>
+              <button class="sh-del" type="button" data-act="sav-pt-del" data-d="${esc(p.d)}" aria-label="删掉${dayText(p.d)}这条">×</button></div>`).join('')}</div>
+            ${pts.length > shown.length ? `<button class="link more" type="button" data-act="sav-hist-all">显示全部 ${pts.length} 条${I.down}</button>` : ''}</div>` : ''}
+          <div class="ce-actions"><button class="btn sm" type="button" data-act="sav-past">补记以前的金额</button>
+            <button class="btn sm ${armed ? 'armed' : 'danger'}" type="button" data-act="sav-del">${armed ? '再点一次确认' : '删除这个账户'}</button></div>
+          <p class="ce-note">钱转到别的账户了，把这里更新成 0 就行。删除账户会连它的历史一起从趋势里去掉。</p>
         </div>`;
       }
       return `${s}</div>`;
@@ -959,10 +1196,11 @@
   }
   async function addSaving() {
     if (!U.unlocked) return;
-    const x = { id: uid('v'), owner: defaultOwner(), name: '银行卡', amt: 0, up: 0 };
+    const x = { id: uid('v'), owner: defaultOwner(), name: '银行卡', amt: 0, up: 0, hist: [] };
     S.savings.push(x);
     await touchSavings(x);
     P.edit = x.id;
+    P.histAll = false;
     renderSettings();
     const inp = $('#savName');
     if (inp) { inp.focus(); inp.select(); }
@@ -974,19 +1212,19 @@
     x.name = name;
     await touchSavings(x);
     const row = $(`#setBody [data-act="sav-edit"][data-id="${CSS.escape(x.id)}"] .cell-main`);
-    if (row) row.textContent = x.name;
+    if (row && row.firstChild) row.firstChild.textContent = x.name;
   }
-  async function setSavingAmount(inp) {
+  async function deletePoint(d) {
     const x = editingSaving();
-    if (!x) return;
-    const v = String(inp.value).replace(/[,，\s¥]/g, '');
-    if (!/^\d+(\.\d{1,2})?$/.test(v) || Number(v) >= 1e11) { toast('金额写数字就行，比如 52000 或 3000.50'); inp.value = centsToExpr(x.amt); return; }
-    const amt = Math.round(parseFloat(v) * 100);
-    if (amt === x.amt) return;
-    x.amt = amt;
+    const old = x && dropPoint(x, d);
+    if (!old) return;
     await touchSavings(x);
-    const row = $(`#setBody [data-act="sav-edit"][data-id="${CSS.escape(x.id)}"] .cell-val`);
-    if (row) row.textContent = money(x.amt);
+    renderSettings();
+    render();
+    toast(`已删掉${dayText(d)}的 ${money(old.amt)}`, {
+      action: '撤销',
+      onAction: async () => { setPoint(x, d, old.amt); await touchSavings(x); if (!$('#setSheet').hidden) renderSettings(); render(); toast('已恢复'); },
+    });
   }
   function deleteSaving() {
     const x = editingSaving();
@@ -999,20 +1237,71 @@
       toast(`已删除「${x.name}」`);
     });
   }
+  // 从同步文件、备份里读进来的存款：检查字段，没有历史的（1.3.0 记的）用「最后改动那天的金额」当第一条
+  const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+  const okCents = (v) => Number.isInteger(v) && v >= 0 && v < 1e13;
+  function cleanSaving(raw) {
+    if (!raw || typeof raw.id !== 'string' || !raw.id || !Number.isFinite(raw.up)) return null;
+    const x = {
+      id: raw.id.slice(0, 64), owner: typeof raw.owner === 'string' ? raw.owner.slice(0, 64) : '',
+      name: chars(typeof raw.name === 'string' && raw.name ? raw.name : '存款').slice(0, 12).join(''),
+      amt: okCents(raw.amt) ? raw.amt : 0, up: raw.up, hist: [],
+    };
+    if (Array.isArray(raw.hist)) {
+      const by = new Map();
+      for (const p of raw.hist) {
+        if (!p || typeof p.d !== 'string' || !DAY_RE.test(p.d) || !Number.isFinite(p.t)) continue;
+        const c = p.del ? { d: p.d, amt: 0, t: p.t, del: true } : okCents(p.amt) ? { d: p.d, amt: p.amt, t: p.t } : null;
+        if (c && !(by.has(c.d) && by.get(c.d).t >= c.t)) by.set(c.d, c);
+      }
+      x.hist = [...by.values()].sort(byDay);
+      recalcAmt(x);
+    } else if (x.amt > 0 && x.up > 0) {
+      x.hist = [{ d: dkey(new Date(x.up)), amt: x.amt, t: x.up }];
+    }
+    if (raw.del) x.del = true;
+    return x;
+  }
+  const samePoint = (a, b) => !!a && !!b && a.t === b.t && a.amt === b.amt && !!a.del === !!b.del;
+  // 账户本身（名字、谁的、删除）谁改得晚用谁；历史按天合并，同一天谁的 t 大用谁。
+  // 本地有文件里没有的东西（比如没升级的手机传了不带历史的旧格式），就标记要把本地的传上去
   function mergeSavings(doc) {
-    let changed = false;
+    let changed = false, mine = false;
     for (const raw of doc && Array.isArray(doc.items) ? doc.items : []) {
-      if (!raw || typeof raw.id !== 'string' || !Number.isFinite(raw.up)) continue;
-      const r = {
-        id: raw.id.slice(0, 64), owner: typeof raw.owner === 'string' ? raw.owner.slice(0, 64) : '',
-        name: chars(typeof raw.name === 'string' && raw.name ? raw.name : '存款').slice(0, 12).join(''),
-        amt: Number.isInteger(raw.amt) && raw.amt >= 0 && raw.amt < 1e13 ? raw.amt : 0, up: raw.up,
-      };
-      if (raw.del) r.del = true;
-      const i = S.savings.findIndex((x) => x.id === r.id);
-      if (i < 0) { S.savings.push(r); changed = true; } else if (r.up > S.savings[i].up) { S.savings[i] = r; changed = true; }
+      const r = cleanSaving(raw);
+      if (!r) continue;
+      const legacy = !Array.isArray(raw.hist);
+      const l = S.savings.find((x) => x.id === r.id);
+      if (!l) { S.savings.push(r); changed = true; if (legacy) mine = true; continue; }
+      const before = JSON.stringify(l);
+      if (legacy) {
+        if (r.up > l.up) {
+          l.name = r.name; l.owner = r.owner;
+          if (r.del) l.del = true; else delete l.del;
+          if (r.amt !== l.amt) { // 旧版手机上改了金额：记成改的那天的一条
+            const d = dkey(new Date(r.up)), old = l.hist.find((p) => p.d === d);
+            if (!old || old.t < r.up) { l.hist = l.hist.filter((p) => p.d !== d).concat({ d, amt: r.amt, t: r.up }).sort(byDay); }
+          }
+          l.up = r.up;
+        }
+        mine = true;
+      } else {
+        if (r.up > l.up) {
+          l.name = r.name; l.owner = r.owner;
+          if (r.del) l.del = true; else delete l.del;
+          l.up = r.up;
+        } else if (l.up > r.up) mine = true;
+        const map = new Map(l.hist.map((p) => [p.d, p]));
+        for (const p of r.hist) { const o = map.get(p.d); if (!o || p.t > o.t) map.set(p.d, p); }
+        l.hist = [...map.values()].sort(byDay);
+        const rm = new Map(r.hist.map((p) => [p.d, p]));
+        if (l.hist.some((p) => !samePoint(rm.get(p.d), p))) mine = true;
+      }
+      recalcAmt(l);
+      if (JSON.stringify(l) !== before) changed = true;
     }
     if (changed) saveSavings();
+    if (mine && SY.st) SY.st.dirty.savings = true;
     return changed;
   }
 
@@ -1045,7 +1334,7 @@
     U.unlocked = false;
     S.st.type = 'out';
     if (S.filter && S.filter.type === 'in') { const from = S.filter.from; S.filter = null; if (S.tab === 'list') S.tab = from === 'income' ? 'income' : 'list'; setTab(S.tab); }
-    if (!$('#entrySheet').hidden && F.type === 'in') closeEntry();
+    if (!$('#entrySheet').hidden && (F.type === 'in' || F.mode === 'saving')) closeEntry();
     if (!$('#setSheet').hidden && P.page === 'savings') gotoPage('main');
     render();
     if (!$('#setSheet').hidden) renderSettings();
@@ -1153,7 +1442,8 @@
   }
 
   /* ================= 记一笔（新增 / 编辑） ================= */
-  const F = { id: null, orig: null, type: 'out', cat: null, sub: '', to: '', expr: '', date: '', note: '', delArm: false };
+  // mode 为 'saving' 时是给存款账户 sav 记金额；fresh：金额是预填的原值，按数字会整个换掉
+  const F = { id: null, orig: null, type: 'out', cat: null, sub: '', to: '', expr: '', date: '', note: '', delArm: false, mode: '', sav: null, fresh: false };
   const defaultOwner = () => (family() ? SY.cfg.me : '');
   let delTimer = 0, hintTimer = 0;
 
@@ -1162,6 +1452,7 @@
     return vis.some((c) => c.id === last) ? last : vis[0] ? vis[0].id : null;
   }
   function openEntry(e, type) {
+    setEntryMode('');
     if (e) Object.assign(F, { id: e.id, orig: e, type: e.type, cat: e.cat, sub: e.sub || '', to: e.to || '', expr: centsToExpr(e.amt), date: e.date, note: e.note || '' });
     else {
       const t = type === 'in' && showIncome() ? 'in' : 'out';
@@ -1188,8 +1479,98 @@
     $('#entryNote').blur();
     $('#entrySheet').hidden = true;
     clearTimeout(delTimer);
+    if (F.mode) setEntryMode('');
+  }
+  // 记账面板有两种用法：记一笔账；或者给存款账户记「哪天一共有多少」（从设置里打开，盖在设置上面）
+  function setEntryMode(mode) {
+    const sav = mode === 'saving';
+    F.mode = mode;
+    F.fresh = false;
+    if (!sav) F.sav = null;
+    $('#entrySheet').classList.toggle('over', sav);
+    $('#entryInfo').hidden = !sav;
+    $('#entryHead').hidden = !sav;
+    $('#entryLabel').hidden = !sav;
+    ['#entryCats', '#entrySubs', '#entryNote'].forEach((s) => { $(s).hidden = sav; });
+    if (sav) ['#entryType', '#entryOwner', '#entryMeta', '#entryDelete'].forEach((s) => { $(s).hidden = true; });
+    const di = $('#entryDate');
+    if (sav) di.max = todayKey(); else di.removeAttribute('max');
+  }
+  function openSavingEntry(id, date, blank) {
+    const x = S.savings.find((v) => v.id === id && !v.del);
+    if (!x || !U.unlocked) return;
+    setEntryMode('saving');
+    F.sav = x.id;
+    F.date = date;
+    const v = blank ? null : valueAt(x, date);
+    F.expr = v == null ? '' : centsToExpr(v);
+    F.fresh = v != null;
+    $('#entryTitle').textContent = '更新存款';
+    $('#entryDate').value = F.date;
+    closeMonthPicker();
+    $('#entrySheet').hidden = false;
+    renderEntry();
+    $('#entryPanel').focus({ preventScroll: true });
+  }
+  function renderSavInfo() {
+    const x = S.savings.find((v) => v.id === F.sav);
+    if (!x) return;
+    const t = todayKey();
+    const day = F.date === t ? '今天' : F.date === shiftDay(t, -1) ? '昨天' : dayText(F.date);
+    $('#entryLabel').textContent = `${day}一共有`;
+    const pts = livePoints(x);
+    const same = pts.find((p) => p.d === F.date);
+    const prev = pts.filter((p) => p.d < F.date).pop();
+    const line = same ? `<p class="si-last warn">${esc(day)}记过 ${money(same.amt)}，保存会换成新的金额</p>`
+      : prev ? `<p class="si-last">上一次：${dayText(prev.d)} ${money(prev.amt)}</p>`
+      : '<p class="si-last">这之前还没记过</p>';
+    $('#entryInfo').innerHTML = `<img class="deco sav-pig" src="img/pig-boy.png" alt="" width="104" height="138">
+      <p class="si-name">${ownerAv(x.owner || '', 'sm')}<span>${esc(x.name)}</span></p>${line}
+      <p class="si-hint">输入账户里一共有多少钱，可以用 + − 算。点键盘上的日期，能补记以前的金额。</p>`;
+  }
+  // 换了日期：金额还是预填的，就换成那天的金额；空着的，那天记过就填上
+  function onSavDate() {
+    const x = S.savings.find((v) => v.id === F.sav);
+    if (F.date > todayKey()) { F.date = todayKey(); $('#entryDate').value = F.date; flashHint('不能记以后的日子'); }
+    if (x && F.fresh) {
+      const v = valueAt(x, F.date);
+      F.expr = v == null ? '' : centsToExpr(v);
+      F.fresh = v != null;
+    } else if (x && !F.expr) {
+      const same = livePoints(x).find((p) => p.d === F.date);
+      if (same) { F.expr = centsToExpr(same.amt); F.fresh = true; }
+    }
+    updateAmount();
+    updateDate();
+  }
+  async function submitSaving() {
+    const x = S.savings.find((v) => v.id === F.sav && !v.del);
+    if (!x || !U.unlocked) { closeEntry(); return; }
+    if (!F.expr) { flashHint('先输入金额'); return; }
+    const amt = evalExpr(F.expr);
+    if (amt < 0) { flashHint('金额不能是负数'); return; }
+    if (amt >= 1e13) { flashHint('金额太大了'); return; }
+    if (F.date > todayKey()) { flashHint('不能记以后的日子'); return; }
+    const d = F.date;
+    setPoint(x, d, amt);
+    try {
+      await touchSavings(x);
+    } catch (err) {
+      flashHint('没存上，请再试一次');
+      return;
+    }
+    closeEntry();
+    if (!$('#setSheet').hidden) renderSettings();
+    render();
+    toast(`已记下「${x.name}」${d === todayKey() ? '' : `${dayText(d)} `}${money(amt)}`);
   }
   function renderEntry() {
+    if (F.mode === 'saving') {
+      $('#entrySheet').dataset.type = 'in';
+      updateAmount();
+      updateDate();
+      return;
+    }
     $('#entryType').hidden = !showIncome(); // 没解锁只能记支出，不显示「收入」
     $$('#entryType button').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.v === F.type)));
     $('#entrySheet').dataset.type = F.type;
@@ -1243,9 +1624,10 @@
     const val = $('#entryVal');
     val.textContent = F.expr ? (v < 0 ? `−${money(-v)}` : money(v)) : '0.00';
     val.classList.toggle('zero', !F.expr);
+    val.classList.toggle('fresh', F.fresh && !!F.expr);
     const ex = $('#entryExpr');
     if (!ex.classList.contains('warn')) ex.textContent = hasOp() ? F.expr.replace(/-/g, '−') : '';
-    $('#kOk').textContent = hasOp() ? '=' : F.id ? '保存' : '完成';
+    $('#kOk').textContent = hasOp() ? '=' : F.id || F.mode ? '保存' : '完成';
   }
   function flashHint(msg) {
     const ex = $('#entryExpr'), amt = $('#entryAmount');
@@ -1262,8 +1644,15 @@
     let label = F.date === t ? '今天' : F.date === shiftDay(t, -1) ? '昨天' : shortDate(F.date);
     if (d.getFullYear() !== new Date().getFullYear()) label = `${String(d.getFullYear()).slice(2)}/${d.getMonth() + 1}/${d.getDate()}`;
     $('#kDateLabel').textContent = label;
+    if (F.mode === 'saving') renderSavInfo();
   }
   function pressKey(k) {
+    if (F.fresh && k !== 'ok') {
+      // 预填的是原来的金额（看起来是选中的）：按数字或退格就整个换掉，按 + − 在原数上接着算
+      F.fresh = false;
+      if (/^\d$/.test(k) || k === '.' || k === 'del') F.expr = '';
+      if (k === 'del') { updateAmount(); return; }
+    }
     let x = F.expr;
     const opAt = Math.max(x.lastIndexOf('+'), x.lastIndexOf('-'));
     const operand = x.slice(opAt + 1);
@@ -1288,13 +1677,15 @@
     updateAmount();
   }
   async function submitEntry() {
+    const sav = F.mode === 'saving';
     if (hasOp()) {
       const v = evalExpr(F.expr);
-      if (v <= 0) { flashHint('算出来的金额要大于 0'); return; }
+      if (sav ? v < 0 : v <= 0) { flashHint(sav ? '算出来不能是负数' : '算出来的金额要大于 0'); return; }
       F.expr = centsToExpr(v);
       updateAmount();
       return;
     }
+    if (sav) { submitSaving(); return; }
     const amt = evalExpr(F.expr);
     if (!(amt > 0)) { flashHint('先输入金额'); return; }
     if (!F.cat) { flashHint('先选一个大类'); return; }
@@ -1338,7 +1729,7 @@
   const savePrefs = () => store.set('prefs', S.prefs);
 
   /* ================= 设置 ================= */
-  const P = { page: 'main', type: 'out', edit: null, importData: null, armed: null, connecting: false, newAv: '' };
+  const P = { page: 'main', type: 'out', edit: null, importData: null, armed: null, connecting: false, newAv: '', histAll: false };
   let armTimer = 0;
   const PAGE_TITLE = { main: '设置', savings: '存款', people: '家人', 'sync-setup': '和家人一起记账', 'sync-who': '这台手机是谁', 'sync-invite': '邀请家人', 'sync-repo': '同步仓库' };
 
@@ -2304,9 +2695,15 @@
       case 'lock-now': lockNow(true); break;
       case 'pin-reset': armOr('pin-reset', resetLocalPin); break;
       case 'inc-cat-toggle': S.inc.open = S.inc.open === d.cat ? null : d.cat; renderIncomeBody(); break;
-      case 'savings-open': openSettings('savings'); break;
+      case 'savings-open': { const v = liveSavings(); P.histAll = false; openSettings('savings', null, v.length === 1 ? v[0].id : null); break; }
       case 'sav-add': addSaving(); break;
-      case 'sav-edit': P.edit = P.edit === d.id ? null : d.id; P.armed = null; renderSettings(); break;
+      case 'sav-edit': P.edit = P.edit === d.id ? null : d.id; P.armed = null; P.histAll = false; renderSettings(); break;
+      case 'sav-amt': openSavingEntry(P.edit, todayKey(), false); break;
+      case 'sav-past': { const x = editingSaving(); if (x) openSavingEntry(x.id, pastDay(x), true); break; }
+      case 'sav-pt': openSavingEntry(P.edit, d.d, false); break;
+      case 'sav-pt-del': deletePoint(d.d); break;
+      case 'sav-hist-all': P.histAll = true; renderSettings(); break;
+      case 'trend-mode': S.inc.trend = d.v; renderIncomeBody(); break;
       case 'sav-owner': { const x = editingSaving(); if (x && (x.owner || '') !== d.id) { x.owner = d.id; touchSavings(x).then(renderSettings); } break; }
       case 'sav-del': deleteSaving(); break;
       case 'f-owner': F.to = d.id; renderOwner(); break;
@@ -2427,14 +2824,13 @@
   });
   document.addEventListener('change', (ev) => {
     const t = ev.target;
-    if (t.id === 'entryDate') { F.date = t.value || todayKey(); updateDate(); }
+    if (t.id === 'entryDate') { F.date = t.value || todayKey(); if (F.mode === 'saving') onSavDate(); else updateDate(); }
     else if (t.id === 'importFile') { const f = t.files && t.files[0]; t.value = ''; if (f) onImportFile(f); }
     else if (t.id === 'ceName') renameCategory(t.value);
     else if (t.id === 'ceMark') remarkCategory(t.value);
     else if (t.id === 'ceNewSub') addSub();
     else if (t.id === 'personName') renamePerson(t.value);
     else if (t.id === 'savName') renameSaving(t.value);
-    else if (t.id === 'savAmt') setSavingAmount(t);
   });
   document.addEventListener('submit', async (ev) => {
     ev.preventDefault();
@@ -2457,9 +2853,10 @@
       else if (ev.key === 'Backspace') { ev.preventDefault(); pinKey('del'); }
       return;
     }
-    if (!$('#setSheet').hidden) {
+    // 存款的计算器盖在设置上面，按键归它
+    if (!$('#setSheet').hidden && !(F.mode === 'saving' && !$('#entrySheet').hidden)) {
       if (ev.key === 'Escape') closeSettings();
-      else if (ev.key === 'Enter' && ['ceName', 'ceMark', 'personName', 'savName', 'savAmt'].includes(tgt.id)) tgt.blur();
+      else if (ev.key === 'Enter' && ['ceName', 'ceMark', 'personName', 'savName'].includes(tgt.id)) tgt.blur();
       return;
     }
     if (!$('#entrySheet').hidden) {
@@ -2476,7 +2873,9 @@
     if (ev.key === 'Enter' && tgt.id === 'q') tgt.blur();
   });
   document.addEventListener('pointerdown', (ev) => {
-    if (hideTip && !(ev.target.closest && ev.target.closest('.chart-box'))) hideTip();
+    const inChart = ev.target.closest && ev.target.closest('.chart-box');
+    if (hideTip && !inChart) hideTip();
+    if (hideTrendTip && !inChart) hideTrendTip();
   }, true);
 
   let lastW = window.innerWidth, rzTimer = 0;
@@ -2487,13 +2886,14 @@
       lastW = window.innerWidth;
       closeMonthPicker();
       if (S.tab === 'stats') renderStatsBody();
+      else if (S.tab === 'income' && U.unlocked) renderIncomeBody();
     }, 150);
   });
   // 隔夜再打开时「今天」要更新；切回前台顺便同步一次，切到后台前把没传的改动传上去
   document.addEventListener('visibilitychange', () => {
     if (!S.cats) return;
     if (document.visibilityState === 'visible') {
-      if (U.unlocked && Date.now() - U.hiddenAt > 60000) lockNow(false); // 在后台超过 1 分钟，收入重新上锁
+      if (U.unlocked && U.hiddenAt && Date.now() - U.hiddenAt > 60000) lockNow(false); // 在后台超过 1 分钟，收入重新上锁
       render();
       syncNow(false);
     } else {
@@ -2545,7 +2945,7 @@
       [store.all(), store.get('cats'), store.get('prefs'), store.get('people'), store.get('sync'), store.get('syncState'), store.get('lock'), store.get('savings')],
     );
     S.lock = validLock(lock) ? lock : null;
-    S.savings = Array.isArray(savings) ? savings : [];
+    S.savings = (Array.isArray(savings) ? savings : []).map(cleanSaving).filter(Boolean);
     if (validCats(cats)) S.cats = normCats(cats);
     else { S.cats = normCats(JSON.parse(JSON.stringify(DEFAULT_CATS))); await store.set('cats', S.cats); }
     sortCats();
@@ -2560,6 +2960,11 @@
       SY.st = st && st.shas && st.dirty ? st : freshSyncState();
       ['cats', 'people', 'lock', 'savings'].forEach((k) => { if (typeof SY.st.dirty[k] !== 'boolean') SY.st.dirty[k] = false; });
       SY.status = 'ok';
+    }
+    // 1.3.0 记的存款没有历史：上面已用最后改动那天的金额补了第一条；开了同步就把新格式传上去
+    if (Array.isArray(savings) && savings.some((x) => x && !Array.isArray(x.hist))) {
+      await store.set('savings', S.savings);
+      if (SY.st) { SY.st.dirty.savings = true; await saveSyncState(); }
     }
     // 1.1.0 新建大类时图标字被写死成「新」：改回跟着名字走（开了同步会顺带传给家人）
     const stuck = ['out', 'in'].flatMap((t) => S.cats[t]).filter((c) => c.mark === '新' && chars(c.name)[0] !== '新');

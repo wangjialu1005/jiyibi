@@ -98,15 +98,18 @@
           <button type="button" role="radio" data-act="f-type" data-v="out">支出</button>
           <button type="button" role="radio" data-act="f-type" data-v="in">收入</button>
         </div>
+        <span class="set-title" id="entryHead" aria-hidden="true" hidden>更新存款</span>
         <button class="link danger" type="button" id="entryDelete" data-act="f-del">删除</button>
       </header>
       <div class="entry-body">
+        <div class="entry-info" id="entryInfo" hidden></div>
         <div class="entry-cats" id="entryCats" role="group" aria-label="大类"></div>
         <div class="entry-subs" id="entrySubs" role="group" aria-label="小类"></div>
         <div class="entry-subs" id="entryOwner" role="group" aria-label="谁的收入" hidden></div>
         <div class="entry-pad">
           <p class="entry-meta" id="entryMeta" hidden></p>
           <div class="entry-line">
+            <span class="entry-label" id="entryLabel" hidden></span>
             <input class="note" id="entryNote" type="text" placeholder="备注（可不填）" enterkeyhint="done" autocomplete="off" aria-label="备注">
             <div class="amount" id="entryAmount" aria-live="polite">
               <div class="expr num" id="entryExpr"></div>
@@ -159,7 +162,7 @@
         <span></span><span></span>
       </header>
       <div class="pin-body">
-        <img class="deco pin-pig" src="img/pig-head.png" alt="" width="88" height="86">
+        <img class="deco pin-pig" src="img/pig-boy-head.png" alt="" width="88" height="97">
         <h2 class="pin-title" id="pinTitle">输入收入密码</h2>
         <p class="pin-msg" id="pinMsg" aria-live="polite"></p>
         <div class="pin-dots" id="pinDots" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>

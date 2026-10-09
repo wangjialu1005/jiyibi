@@ -882,6 +882,70 @@ html[data-skin="plain"] .pin-keys { padding: 0 0 env(safe-area-inset-bottom, 0px
 .pin-keys .key { height: 58px; font-size: 26px; }
 .key.blank { background: transparent; box-shadow: none; pointer-events: none; }
 
+/* ---------- 存款趋势 · 存款历史 · 存款计算器（1.4.0） ---------- */
+:root, html[data-skin="cute"] { --ln-tie: #4F86D0; --ln-bow: #E06C8A; --ln-co: #A08E87; }
+html[data-skin="plain"] { --ln-tie: #2F6FDB; --ln-bow: #D2557A; --ln-co: #8E8E93; }
+@media (prefers-color-scheme: dark) {
+  :root, html[data-skin="cute"] { --ln-tie: #82B1F2; --ln-bow: #F59AB2; --ln-co: #A3948E; }
+  html[data-skin="plain"] { --ln-tie: #5B9BFF; --ln-bow: #FF8FB0; --ln-co: #98989F; }
+}
+.ln-total { --lc: var(--inc-bar); }
+.ln-tie { --lc: var(--ln-tie); }
+.ln-bow { --lc: var(--ln-bow); }
+.ln-co { --lc: var(--ln-co); }
+.ln-o1 { --lc: #D9902B; }
+.ln-o2 { --lc: #2E9E8F; }
+.ln-o3 { --lc: #8A63D2; }
+.chart .ln { fill: none; stroke: var(--lc); stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; }
+.chart .area { fill: url(#savGrad); stroke: none; }
+.chart .gs { stop-color: var(--inc-bar); }
+.chart .dot { fill: var(--lc); stroke: var(--card); stroke-width: 2; }
+.chart .hov { fill: var(--lc); stroke: var(--card); stroke-width: 2.5; }
+.chart .xh { stroke: var(--ink-3); stroke-width: 1; stroke-dasharray: 3 3; }
+.chart .last { fill: var(--ink); font: 700 11px var(--num); font-variant-numeric: tabular-nums; paint-order: stroke; stroke: var(--card); stroke-width: 3px; stroke-linejoin: round; }
+.trend-tools { display: flex; justify-content: flex-end; padding: 0 2px 4px; }
+.trend-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 4px 8px 6px; font-size: 12.5px; font-weight: 600; color: var(--ink-2); }
+.trend-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { display: inline-block; flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--lc); }
+.tip .tip-d { opacity: .8; }
+.tip.multi { top: 4px; flex-direction: column; align-items: stretch; gap: 4px; padding: 8px 12px; border-radius: 14px; }
+.tip-h { font-size: 12px; opacity: .8; }
+.tip-r { display: flex; align-items: center; gap: 6px; }
+.tip-r b { margin-left: auto; padding-left: 12px; font-size: 13px; }
+.trend-empty { display: flex; align-items: center; gap: 12px; padding: 14px 16px; font-size: 13.5px; color: var(--ink-2); }
+.trend-empty p { flex: 1; min-width: 0; }
+.trend-empty .btn { flex: none; }
+.sav-mom { padding: 0 16px 10px; font-size: 12.5px; font-weight: 600; text-align: right; color: var(--ink-3); }
+.sav-mom.up { color: var(--inc); }
+.sav-mom.down { color: var(--exp-num); }
+.inc-empty { display: flex; flex-direction: column; align-items: center; padding-top: 22px; }
+.inc-empty img { width: 80px; }
+.inc-empty .empty-note { padding-top: 6px; }
+.cell-sub { display: block; margin-top: 1px; font-size: 12px; font-weight: 500; color: var(--ink-3); }
+.sav-hist { overflow: hidden; border-radius: 14px; background: var(--fill); }
+.sh-row { display: flex; align-items: stretch; }
+.sh-row + .sh-row { border-top: 1px solid var(--line); }
+.sh-main { flex: 1; min-width: 0; display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 10px 6px 10px 12px; font-size: 14px; color: var(--ink-2); text-align: left; }
+.sh-main b { font: 700 15px var(--num); font-variant-numeric: tabular-nums; color: var(--ink); }
+.sh-del { flex: none; display: grid; place-items: center; width: 44px; color: var(--ink-3); font-size: 18px; }
+.sh-main:active, .sh-del:active { background: var(--fill-2); }
+.ce-body > .btn.inc { justify-self: start; }
+/* 存款的计算器从设置里打开，要盖在设置上面 */
+.sheet.over { z-index: 50; }
+#entryType, #entryHead { grid-column: 2; }
+#entryDelete { grid-column: 3; }
+.entry-info { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 8px 24px 16px; text-align: center; }
+.entry-info .sav-pig { width: 104px; margin-bottom: 2px; }
+.si-name { display: inline-flex; align-items: center; gap: 8px; font-size: 18px; font-weight: 700; }
+.si-last { font-size: 14px; color: var(--ink-2); }
+.si-last.warn { color: var(--accent-ink); font-weight: 600; }
+.si-hint { max-width: 22em; margin-top: 4px; font-size: 12.5px; color: var(--ink-3); }
+.entry-label { flex: 1; min-width: 0; padding-bottom: 6px; font-size: 15px; font-weight: 700; color: var(--ink-2); }
+.amount .val.fresh { border-radius: 6px; background: var(--inc-soft); box-shadow: 0 0 0 4px var(--inc-soft); }
+@media (max-height: 700px) {
+  .entry-info .sav-pig { width: 80px; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .sheet-panel, .toast.in, .shake, .sync-btn svg { animation: none !important; }
   .fab, .btn, .key, .row, .cat-tile .tile, .seg button { transition: none; }
