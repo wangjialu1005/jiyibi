@@ -1,7 +1,7 @@
 /* 记一笔 —— 账先存在本机（IndexedDB）；开了家庭同步，再同步到自己的 GitHub 私有仓库。金额一律用「分」存整数 */
 'use strict';
 (() => {
-  const VERSION = '1.4.1';
+  const VERSION = '1.4.2';
   // 本机调试时可以用 ?api=/mockgh 指向假的 GitHub 接口；正式环境固定走 api.github.com
   const GH = (() => {
     const local = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
@@ -990,7 +990,7 @@
           ${ownerAv(id, 'md')}
           <span class="cr-main">
             <span class="cr-top"><span class="cr-name">${esc(ownerName(id))}的存款</span><span class="cr-pct num">${total ? fmtPct((amt / total) * 100) : ''}</span><span class="cr-amt num">${money(amt)}</span></span>
-            <span class="cr-bar"><i class="${personBar(id, 'in')}" style="width:${Math.max(1.5, (amt / max) * 100).toFixed(2)}%"></i></span>
+            <span class="cr-bar"><i class="${personBar(id, 'in')}" style="width:${amt ? Math.max(1.5, (amt / max) * 100).toFixed(2) : 0}%"></i></span>
           </span></div></div>`).join('')}
         <div class="cat-item"><button class="cell" type="button" data-act="savings-open"><span class="cell-main">更新存款</span><span class="cell-val">${items.length} 个账户</span>${I.right}</button></div>
       </div></section>`;
@@ -1003,9 +1003,14 @@
     return p && AV[p.av] ? `ln-${p.av}` : `ln-o${(i % 3) + 1}`;
   }
   function trendBlock(ser) {
-    if (!ser) return '';
-    const n = ser.months.length;
     const title = `<h2 class="block-title"><span>${deco('snout', 'ic-snout')}存款趋势</span>`;
+    // 一笔金额都还没记：这一块也要露出来，告诉人怎么才能看到趋势
+    if (!ser) {
+      return `<section class="block">${title}</h2><div class="card-like trend-empty">
+        <p>还没记存款金额。先记下每个账户现在有多少，再补记以前每个月底的金额，这里就会画出存款每个月的变化。</p>
+        <button class="btn sm" type="button" data-act="savings-open">去记</button></div></section>`;
+    }
+    const n = ser.months.length;
     if (n < 2) {
       return `<section class="block">${title}</h2><div class="card-like trend-empty">
         <p>现在只有这个月的记录。把以前每个月底有多少补记上，就能看到存款是怎么涨起来的。</p>
