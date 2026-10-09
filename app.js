@@ -1,7 +1,7 @@
 /* 记一笔 —— 账先存在本机（IndexedDB）；开了家庭同步，再同步到自己的 GitHub 私有仓库。金额一律用「分」存整数 */
 'use strict';
 (() => {
-  const VERSION = '1.4.2';
+  const VERSION = '1.4.3';
   // 本机调试时可以用 ?api=/mockgh 指向假的 GitHub 接口；正式环境固定走 api.github.com
   const GH = (() => {
     const local = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
@@ -873,7 +873,7 @@
       </div>
       <button class="btn inc wide" type="button" data-act="add-income">${I.plus}记一笔收入</button>
     </section>`;
-    h += savingsCard(ser);
+    h += savingsCard();
     h += trendBlock(ser);
     if (t.in) {
       h += ownerBreakdown(list, t.in);
@@ -933,41 +933,45 @@
     recalcAmt(x);
     return old;
   }
-  // 补记默认记到最早那条的上个月底，一个月一个月往回补
+  // 补记默认记到最早那条的上个月底，再用日期键改成想补的那天
   const pastDay = (x) => { const ps = livePoints(x); return monthRange(addMonths(ps.length ? ps[0].d.slice(0, 7) : todayKey().slice(0, 7), -1)).end; };
 
-  // 存款趋势：从最早一条记录的那个月到这个月（最多 24 个月），每个月取各账户月底（这个月取今天）的金额相加
+  // 存款走势：每个有记录的日子是一个点，值是那天各账户最新记的金额相加（那天没更新的账户沿用上一次的数）。
+  // 横轴按真实日期排，隔几天就隔多远；全部历史都画
   function savingsSeries() {
     const items = liveSavings().filter(lastPoint);
-    if (!items.length) return null;
-    const tk = todayKey(), nowMk = tk.slice(0, 7);
-    let start = items.reduce((m, x) => { const mk = livePoints(x)[0].d.slice(0, 7); return mk < m ? mk : m; }, nowMk);
-    if (start < addMonths(nowMk, -23)) start = addMonths(nowMk, -23);
-    const months = [];
-    for (let mk = start; mk <= nowMk; mk = addMonths(mk, 1)) months.push(mk);
+    const tk = todayKey();
+    const ev = [];
+    items.forEach((x, a) => livePoints(x).forEach((p) => { if (p.d <= tk) ev.push({ d: p.d, a, amt: p.amt }); }));
+    if (!ev.length) return null;
+    ev.sort(byDay);
     const keys = [...new Set(items.map((x) => x.owner || ''))];
+    const own = items.map((x) => keys.indexOf(x.owner || ''));
+    const cur = items.map(() => null);
     const total = [], by = keys.map(() => []);
-    for (const mk of months) {
-      const end = monthRange(mk).end, cut = end < tk ? end : tk;
+    for (let i = 0; i < ev.length;) {
+      const d = ev[i].d, touched = new Set();
+      for (; i < ev.length && ev[i].d === d; i++) { cur[ev[i].a] = ev[i].amt; touched.add(own[ev[i].a]); }
       let tot = 0;
-      const o = keys.map(() => null); // 这个人的账户那时还一条都没记：不算 0，画线时空着
-      for (const x of items) {
-        const v = valueAt(x, cut);
-        if (v == null) continue;
-        tot += v;
-        const k = keys.indexOf(x.owner || '');
-        o[k] = (o[k] || 0) + v;
+      cur.forEach((v) => { if (v != null) tot += v; });
+      total.push({ d, v: tot });
+      // 每人的线只在这个人的账户有变动的日子加点；还没开始记的日子不画
+      for (const k of touched) {
+        let ov = 0;
+        cur.forEach((v, a) => { if (v != null && own[a] === k) ov += v; });
+        by[k].push({ d, v: ov });
       }
-      total.push(tot);
-      o.forEach((v, i) => by[i].push(v));
     }
+    // 每人的线都画到最后一天：之后没再更新的，沿用最近一次的金额（这个点不画圆点）
+    const lastD = total[total.length - 1].d;
+    by.forEach((pts) => { const e = pts[pts.length - 1]; if (e.d < lastD) pts.push({ d: lastD, v: e.v, carry: true }); });
     // 钱多的人排前面，「共同」放最后
-    const owners = keys.map((id, i) => ({ id, values: by[i] }))
-      .sort((p, q) => (!p.id - !q.id) || (q.values[q.values.length - 1] - p.values[p.values.length - 1]));
-    return { months, total, owners };
+    const owners = keys.map((id, k) => ({ id, pts: by[k] }))
+      .sort((p, q) => (!p.id - !q.id) || (q.pts[q.pts.length - 1].v - p.pts[p.pts.length - 1].v));
+    return { total, owners, first: total[0].d, last: lastD };
   }
 
-  function savingsCard(ser) {
+  function savingsCard() {
     const items = liveSavings();
     const title = `<h2 class="block-title"><span>${deco('snout', 'ic-snout')}目前存款</span>`;
     if (!items.length) {
@@ -979,9 +983,11 @@
     const rows = [...by.entries()].sort((a, b) => b[1] - a[1]);
     const max = Math.max(1, rows[0][1]);
     const lastD = items.reduce((m, x) => { const p = lastPoint(x); return p && p.d > m ? p.d : m; }, '');
-    const n = ser ? ser.total.length : 0;
-    const prev = n >= 2 ? ser.total[n - 2] : 0;
-    const mom = prev ? deltaText({ label: '比上月底', cur: total, prev }) : '';
+    // 和上月底比：每个账户取上月底（含）之前最近一次记的数；那时还没开始记的账户不算
+    const pe = monthRange(addMonths(todayKey().slice(0, 7), -1)).end;
+    let prev = 0, known = false;
+    for (const x of items) { const v = valueAt(x, pe); if (v != null) { prev += v; known = true; } }
+    const mom = known && prev ? deltaText({ label: '比上月底', cur: total, prev }) : '';
     return `<section class="block">${title}${lastD ? `<span class="bt-hint">${dayText(lastD)}更新</span>` : ''}</h2>
       <div class="cat-list">
         <div class="sav-total"><span>合计</span><b class="num">${money(total)}</b></div>
@@ -1007,24 +1013,23 @@
     // 一笔金额都还没记：这一块也要露出来，告诉人怎么才能看到趋势
     if (!ser) {
       return `<section class="block">${title}</h2><div class="card-like trend-empty">
-        <p>还没记存款金额。先记下每个账户现在有多少，再补记以前每个月底的金额，这里就会画出存款每个月的变化。</p>
+        <p>还没记存款金额。先记下每个账户现在有多少，以后想起来就更新一下（隔几天、隔几周都行），也可以补记以前的金额。有两天以上的记录，这里就会画出存款的变化。</p>
         <button class="btn sm" type="button" data-act="savings-open">去记</button></div></section>`;
     }
-    const n = ser.months.length;
-    if (n < 2) {
+    if (ser.first === ser.last) {
       return `<section class="block">${title}</h2><div class="card-like trend-empty">
-        <p>现在只有这个月的记录。把以前每个月底有多少补记上，就能看到存款是怎么涨起来的。</p>
+        <p>现在只有${dayText(ser.first)}这一天的记录。以后再更新一次，或者补记以前的金额，就能看到存款的变化。</p>
         <button class="btn sm" type="button" data-act="savings-open">去补记</button></div></section>`;
     }
-    const d = ser.total[n - 1] - ser.total[0];
-    const first = ser.months[0];
-    const since = first.slice(0, 4) === ser.months[n - 1].slice(0, 4) ? `${Number(first.slice(5))}月底以来` : `${monthLabel(first)}底以来`;
+    const v0 = ser.total[0].v, v1 = ser.total[ser.total.length - 1].v, d = v1 - v0;
+    const since = `${dayText(ser.first)}以来`;
+    const change = d ? `${d > 0 ? '多了' : '少了'} ${money(Math.abs(d))}` : '持平';
     const multi = ser.owners.length > 1;
     const mode = multi ? S.inc.trend : 'total';
     const legend = mode === 'owner'
       ? `<div class="trend-legend">${ser.owners.map((o, i) => `<span><i class="sw ${lineCls(o.id, i)}"></i>${esc(ownerName(o.id))}</span>`).join('')}</div>` : '';
-    const aria = `存款趋势折线图：${since}${d > 0 ? '多了' : d < 0 ? '少了' : '持平'}${d ? ` ${money(Math.abs(d))}` : ''}，现在 ${money(ser.total[n - 1])}。可用左右方向键逐月查看`;
-    return `<section class="block">${title}<span class="bt-hint">${since}${d ? `${d > 0 ? '多了' : '少了'} ${money(Math.abs(d))}` : '持平'}</span></h2>
+    const aria = `存款趋势折线图：${since}${change}，现在 ${money(v1)}。可用左右方向键逐个查看每次的记录`;
+    return `<section class="block">${title}<span class="bt-hint">${since}${change}</span></h2>
       <div class="chart-wrap">
         ${multi ? `<div class="trend-tools">${seg('trend-mode', [['total', '合计'], ['owner', '按人']], mode, '存款趋势看合计还是按人')}</div>` : ''}
         <div class="chart-box" id="trendBox" tabindex="0" role="group" aria-label="${esc(aria)}"></div>${legend}
@@ -1035,7 +1040,7 @@
   function niceRange(minC, maxC) {
     let lo = minC / 100, hi = maxC / 100;
     if (hi - lo < 0.01) { const pad = Math.max(1, Math.abs(hi) * 0.05); lo -= pad; hi += pad; }
-    const raw = (hi - lo) / 3, mag = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / mag;
+    const raw = (hi - lo) / 4, mag = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / mag;
     const step = (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * mag;
     let a = Math.floor(lo / step) * step;
     const b = Math.ceil(hi / step) * step;
@@ -1050,23 +1055,45 @@
     const label = (c) => (c === 0 ? '0' : `${+(c / 100 / unit).toFixed(dec)}${unit > 1 ? '万' : ''}`);
     return { lo: ticks[0], hi: ticks[ticks.length - 1], ticks, label };
   }
+  // 横轴刻度：按时间跨度挑间隔（几天、一两周、几个月、几年），刻度落在整天、每月 1 号或每年 1 月 1 号
+  function timeTicks(a, b, maxN) {
+    const days = diffDays(a, b);
+    for (const n of [1, 2, 3, 7, 14]) {
+      if (Math.floor(days / n) + 1 > maxN) continue;
+      const out = [];
+      for (let k = a; k <= b; k = shiftDay(k, n)) out.push({ k, label: `${Number(k.slice(5, 7))}/${Number(k.slice(8))}` });
+      return out;
+    }
+    const crossYear = a.slice(0, 4) !== b.slice(0, 4);
+    for (const n of [1, 2, 3, 6, 12, 24, 60, 120]) {
+      const out = [];
+      for (let mk = a.slice(8) === '01' ? a.slice(0, 7) : addMonths(a.slice(0, 7), 1); `${mk}-01` <= b; mk = addMonths(mk, 1)) {
+        const y = Number(mk.slice(0, 4)), m = Number(mk.slice(5, 7));
+        if (n < 12 ? (m - 1) % n !== 0 : m !== 1 || y % (n / 12) !== 0) continue;
+        // 跨年时第一个刻度和每年 1 月带上年份，免得两个「10月」分不清
+        out.push({ k: `${mk}-01`, label: n >= 12 ? `${y}年` : (m === 1 || !out.length) && crossYear ? `${String(y).slice(2)}年${m}月` : `${m}月` });
+      }
+      if (out.length <= maxN) return out;
+    }
+    return [];
+  }
   let hideTrendTip = null;
   function drawTrend(box, ser, mode) {
     const W = Math.max(240, Math.floor(box.clientWidth));
-    const H = 176, L = 44, R = 14, T = 22, B = 22;
+    const H = 176, L = 44, R = 16, T = 22, B = 22;
     const pw = W - L - R, ph = H - T - B;
-    const n = ser.months.length;
     const lines = mode === 'owner'
-      ? ser.owners.map((o, i) => ({ cls: lineCls(o.id, i), name: ownerName(o.id), values: o.values }))
-      : [{ cls: 'ln-total', name: '合计', values: ser.total }];
-    const all = lines.flatMap((l) => l.values).filter((v) => v != null);
+      ? ser.owners.map((o, i) => ({ cls: lineCls(o.id, i), name: ownerName(o.id), pts: o.pts }))
+      : [{ cls: 'ln-total', name: '合计', pts: ser.total }];
+    const all = lines.flatMap((l) => l.pts.map((p) => p.v));
     const sc = niceRange(Math.min(...all), Math.max(...all));
     const q = (v) => Math.round(v * 100) / 100;
-    const X = (i) => L + (pw * i) / (n - 1);
+    const t0 = parseDay(ser.first).getTime(), span = Math.max(1, parseDay(ser.last).getTime() - t0);
+    const X = (k) => L + ((parseDay(k).getTime() - t0) / span) * pw;
     const Y = (v) => T + ph - ((v - sc.lo) / (sc.hi - sc.lo)) * ph;
-    const nowMk = todayKey().slice(0, 7);
-    const sel = ser.months.indexOf(S.month);
-    const crossYear = ser.months[0].slice(0, 4) !== ser.months[n - 1].slice(0, 4);
+    const dates = ser.total.map((p) => p.d), xs = dates.map(X), n = dates.length;
+    // 某条线在某天的金额：那天（含）之前最近的一个点；那时还没开始记就是 null
+    const at = (pts, k) => { let v = null; for (const p of pts) { if (p.d > k) break; v = p.v; } return v; };
 
     let s = `<svg class="chart" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" aria-hidden="true">`;
     if (mode !== 'owner') s += '<defs><linearGradient id="savGrad" x1="0" y1="0" x2="0" y2="1"><stop class="gs" offset="0" stop-opacity=".26"/><stop class="gs" offset="1" stop-opacity="0"/></linearGradient></defs>';
@@ -1077,22 +1104,20 @@
     });
     s += `<line class="xh" x1="0" x2="0" y1="${T - 8}" y2="${T + ph}" visibility="hidden"/>`;
     for (const l of lines) {
-      const idx = [...l.values.keys()].filter((i) => l.values[i] != null);
-      const pts = idx.map((i) => `${q(X(i))},${q(Y(l.values[i]))}`);
-      if (mode !== 'owner') s += `<path class="area" d="M${pts.join('L')}L${q(X(idx[idx.length - 1]))},${T + ph}L${q(X(idx[0]))},${T + ph}Z"/>`;
+      const pts = l.pts.map((p) => `${q(X(p.d))},${q(Y(p.v))}`);
+      if (mode !== 'owner') s += `<path class="area" d="M${pts.join('L')}L${q(X(l.pts[l.pts.length - 1].d))},${T + ph}L${q(X(l.pts[0].d))},${T + ph}Z"/>`;
       if (pts.length > 1) s += `<polyline class="ln ${l.cls}" points="${pts.join(' ')}"/>`;
-      for (const i of n <= 12 ? idx : [n - 1]) s += `<circle class="dot ${l.cls}" cx="${q(X(i))}" cy="${q(Y(l.values[i]))}" r="3.5"/>`;
+      // 圆点只画真记过的日子；点太密就只标最后一个，免得糊成一片
+      const real = l.pts.filter((p) => !p.carry);
+      for (const p of real.length > pw / 12 ? real.slice(-1) : real) s += `<circle class="dot ${l.cls}" cx="${q(X(p.d))}" cy="${q(Y(p.v))}" r="3.5"/>`;
     }
     // 合计只有一条线：把现在的金额标在最后一个点旁边（往下走时标在点下面，免得压住线）
     if (mode !== 'owner') {
-      const v = ser.total[n - 1], down = ser.total[n - 2] > v;
-      s += `<text class="last" x="${q(X(n - 1))}" y="${q(Y(v) + (down ? 17 : -9))}" text-anchor="end">${money(v)}</text>`;
+      const v = ser.total[n - 1].v, down = ser.total[n - 2].v > v;
+      s += `<text class="last" x="${q(xs[n - 1])}" y="${q(Y(v) + (down ? 17 : -9))}" text-anchor="end">${money(v)}</text>`;
     }
-    const every = Math.ceil(n / 6);
-    for (let i = n - 1; i >= 0; i -= every) {
-      const mk = ser.months[i], m = Number(mk.slice(5, 7));
-      const txt = crossYear && (m === 1 || i === 0) ? `${mk.slice(2, 4)}年${m}月` : `${m}月`;
-      s += `<text class="xl${i === sel ? ' now' : ''}" x="${q(X(i))}" y="${H - 6}" text-anchor="middle">${txt}</text>`;
+    for (const t of timeTicks(ser.first, ser.last, clamp(Math.floor(pw / 48), 3, 8))) {
+      s += `<text class="xl" x="${q(X(t.k))}" y="${H - 6}" text-anchor="middle">${t.label}</text>`;
     }
     for (const l of lines) s += `<circle class="hov ${l.cls}" cx="0" cy="0" r="5.5" visibility="hidden"/>`;
     s += '</svg><div class="tip" role="status" aria-live="polite" hidden></div>';
@@ -1102,40 +1127,48 @@
     const hovs = [...svgEl.querySelectorAll('.hov')];
     let cur = -1;
     const scale = () => svgEl.getBoundingClientRect().width / W;
-    const idxAt = (clientX) => clamp(Math.round(((clientX - svgEl.getBoundingClientRect().left) / scale() - L) / (pw / (n - 1))), 0, n - 1);
-    const when = (i) => (ser.months[i] === nowMk ? '现在' : `${monthLabel(ser.months[i])}底`);
+    // 手指在哪就选离它最近的那次记录
+    const idxAt = (clientX) => {
+      const px = (clientX - svgEl.getBoundingClientRect().left) / scale();
+      let best = 0;
+      xs.forEach((x, i) => { if (Math.abs(x - px) < Math.abs(xs[best] - px)) best = i; });
+      return best;
+    };
+    const when = (k) => (k === todayKey() ? '今天' : dayText(k));
     const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
     const show = (i) => {
       cur = i;
-      xh.setAttribute('x1', q(X(i)));
-      xh.setAttribute('x2', q(X(i)));
+      const k = dates[i];
+      xh.setAttribute('x1', q(xs[i]));
+      xh.setAttribute('x2', q(xs[i]));
       xh.setAttribute('visibility', 'visible');
-      hovs.forEach((c, k) => {
-        const v = lines[k].values[i];
+      hovs.forEach((c, j) => {
+        const v = at(lines[j].pts, k);
         if (v == null) { c.setAttribute('visibility', 'hidden'); return; }
-        c.setAttribute('cx', q(X(i)));
+        c.setAttribute('cx', q(xs[i]));
         c.setAttribute('cy', q(Y(v)));
         c.setAttribute('visibility', 'visible');
       });
       tip.replaceChildren();
       tip.classList.toggle('multi', lines.length > 1);
       if (lines.length === 1) {
-        tip.append(el('b', '', money(lines[0].values[i])), el('span', '', when(i)));
+        tip.append(el('b', '', money(ser.total[i].v)), el('span', '', when(k)));
         if (i > 0) {
-          const dv = lines[0].values[i] - lines[0].values[i - 1];
+          const dv = ser.total[i].v - ser.total[i - 1].v;
           if (dv) tip.append(el('span', 'tip-d', `${dv > 0 ? '↑' : '↓'}${money(Math.abs(dv))}`));
         }
       } else {
-        tip.append(el('span', 'tip-h', when(i)));
+        tip.append(el('span', 'tip-h', when(k)));
         for (const l of lines) {
-          if (l.values[i] == null) continue;
+          const v = at(l.pts, k);
+          if (v == null) continue;
           const r = el('span', 'tip-r');
-          r.append(el('i', `sw ${l.cls}`), el('span', '', l.name), el('b', '', money(l.values[i])));
+          r.append(el('i', `sw ${l.cls}`), el('span', '', l.name), el('b', '', money(v)));
           tip.append(r);
         }
       }
       tip.hidden = false;
-      const c = X(i) * scale(), w = tip.offsetWidth, bw = box.clientWidth;
+      const c = xs[i] * scale(), w = tip.offsetWidth, bw = box.clientWidth;
       // 好几行的提示放在竖线旁边，别挡住选中的那几个点
       const left = lines.length > 1 ? (c > bw / 2 ? c - w - 12 : c + 12) : c - w / 2;
       tip.style.left = `${clamp(left, 0, Math.max(0, bw - w))}px`;
